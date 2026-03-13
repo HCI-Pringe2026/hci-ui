@@ -783,6 +783,10 @@ class EEGViewer(QWidget):
         self._start_log()
         self._start_data_thread()
 
+        self.cb_rec_all.setEnabled(False)
+        for cb in self.record_checkboxes.values():
+            cb.setEnabled(False)
+
     def disconnect_stream(self):
         self._stop_data_thread()
         self.inlet = None
@@ -792,6 +796,10 @@ class EEGViewer(QWidget):
             if ch in self.show_checkboxes:
                 self.channel_show[ch] = self.show_checkboxes[ch].isChecked()
                 self.channel_record[ch] = self.record_checkboxes[ch].isChecked()
+
+        self.cb_rec_all.setEnabled(True)
+        for cb in self.record_checkboxes.values():
+            cb.setEnabled(True)
 
     # ──────────────────────────────────────────
     # PLOTS
