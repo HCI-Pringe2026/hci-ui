@@ -1,0 +1,66 @@
+[tool.poetry]
+name = "hci"
+version = "0.1.0"
+description = ""
+authors = ["yel-gar"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+pylsl = "^1.18.1"
+scipy = "^1.17.1"
+numpy = "^2.4.3"
+pyqt5-qt5 = "5.15.2"
+pyqt5 = "^5.15.11"
+pyqtgraph = "^0.14.0"
+scipy-stubs = "^1.17.1.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "black (>=26.3.1,<27.0.0)",
+    "ruff (>=0.15.6,<0.16.0)",
+    "pre-commit (>=4.5.1,<5.0.0)"
+]
+
+
+[tool.black]
+line-length = 120
+target-version = ["py313"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "F",
+    "E",
+    "W",
+    "I",
+    "N",
+    "UP",
+    "B",
+    "ASYNC",
+    "C4",
+    "PIE",
+    "T20",
+    "Q",
+    "RET",
+    "SIM",
+    "ARG",
+    "PTH",
+    "RUF"
+]
+ignore = [
+    "PIE796",
+    "B028",
+    "RUF018",
+    "N818",
+    "B905",
+    "RUF012"
+]
