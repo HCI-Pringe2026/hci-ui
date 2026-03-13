@@ -9,6 +9,7 @@ Thread layout:
   GUI thread   — Qt timer at 25 fps redraws plots and processes corr results.
   Sound thread — daemon, runs beep loop when condition is met.
 """
+
 import sys
 import time
 import csv
@@ -66,7 +67,7 @@ def ch_color(i):
 
 class TimeZoomViewBox(pg.ViewBox):
     """
-    Wheel / touchpad scroll  -> zoom X
+    Wheel / touchpad scroll  -> zoom X, anchored to right edge
     Ctrl + Wheel             -> zoom Y for current plot only
     Double click             -> reset Y autorange
     """
@@ -81,7 +82,24 @@ class TimeZoomViewBox(pg.ViewBox):
             self.enableAutoRange(axis='y', enable=False)
             super().wheelEvent(ev, axis=1)
         else:
-            super().wheelEvent(ev, axis=0)
+            # Zoom X anchored to the right edge
+            # ViewBox receives QGraphicsSceneWheelEvent which uses delta(), not angleDelta()
+            delta = ev.delta()
+            if delta == 0:
+                ev.accept()
+                return
+
+            zoom_factor = 1.15 if delta > 0 else 1.0 / 1.15
+
+            x_min, x_max = self.viewRange()[0]
+            current_width = x_max - x_min
+            new_width = current_width / zoom_factor
+
+            # Anchor: keep x_max (right edge) fixed
+            new_x_min = x_max - new_width
+            self.enableAutoRange(axis='x', enable=False)
+            self.setXRange(new_x_min, x_max, padding=0)
+            ev.accept()
 
     def mouseDragEvent(self, ev, axis=None):
         ev.accept()
@@ -447,7 +465,7 @@ class EEGViewer(QWidget):
             cb = QCheckBox(ch)
             cb.setChecked(True)
             cb.setEnabled(True)
-            cb.stateChanged.connect(lambda state, ch=ch: self.toggle_channel(ch, state))
+            cb.stateChanged.connect(lambda state, c=ch: self.toggle_channel(c, state))
             cl2.addWidget(cb)
             self.channel_checkboxes[ch] = cb
         left.addWidget(channel_box)
@@ -896,9 +914,9 @@ class EEGViewer(QWidget):
                 vb = p.getViewBox()
                 if vb is changed_vb:
                     continue
-                vb.blockSignals(True)
+                # Do NOT blockSignals — that suppresses the internal axis/grid
+                # repaint. The _syncing_x guard above prevents infinite recursion.
                 vb.setXRange(x0, x1, padding=0)
-                vb.blockSignals(False)
         finally:
             self._syncing_x = False
 
