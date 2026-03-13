@@ -124,16 +124,18 @@ class DataThread(threading.Thread):
     def __init__(self, inlet, fs, log_file, log_writer,
                  disp_lock, disp_buffers,
                  corr_job_q,
-                 active_channels_getter):
+                 active_channels_getter,
+                 shown_channels_getter):
         super().__init__(daemon=True)
-        self.inlet        = inlet
-        self.fs           = fs
-        self.log_file     = log_file
-        self.log_writer   = log_writer
-        self.disp_lock    = disp_lock
-        self.disp_buffers = disp_buffers
-        self.corr_job_q   = corr_job_q
-        self.active_channels_getter = active_channels_getter
+        self.inlet                  = inlet
+        self.fs                     = fs
+        self.log_file               = log_file
+        self.log_writer             = log_writer
+        self.disp_lock              = disp_lock
+        self.disp_buffers           = disp_buffers
+        self.corr_job_q             = corr_job_q
+        self.active_channels_getter = active_channels_getter   # recorded channels
+        self.shown_channels_getter  = shown_channels_getter    # displayed channels
 
         self.running = True
 
@@ -157,16 +159,17 @@ class DataThread(threading.Thread):
             if not chunk:
                 continue
 
-            active_channels = self.active_channels_getter()
-            active_indices = [CHANNEL_NAMES.index(ch) for ch in active_channels]
+            active_channels = self.active_channels_getter()   # channels to record
+            shown_channels  = self.shown_channels_getter()    # channels to display
+            active_indices  = [CHANNEL_NAMES.index(ch) for ch in active_channels]
 
             rows = []
-            disp_batch = {ch: [] for ch in active_channels}
+            disp_batch   = {ch: [] for ch in shown_channels}
 
             for sample, ts in zip(chunk, timestamps):
                 t = ts if ts else time.time()
 
-                # лог: только активные каналы
+                # лог: только записываемые каналы
                 row = [f"{t:.6f}"]
                 for i in active_indices:
                     if i < len(sample):
@@ -175,7 +178,7 @@ class DataThread(threading.Thread):
                         row.append("0.0000")
                 rows.append(row)
 
-                # display batch
+                # display batch — все показываемые каналы
                 for i, ch in enumerate(CHANNEL_NAMES):
                     if ch in disp_batch and i < len(sample):
                         disp_batch[ch].append(sample[i])
@@ -206,7 +209,7 @@ class DataThread(threading.Thread):
                 self._flush_cnt = 0
 
             with self.disp_lock:
-                for ch in active_channels:
+                for ch in shown_channels:
                     if ch in self.disp_buffers:
                         self.disp_buffers[ch].extend(disp_batch[ch])
 
@@ -398,7 +401,8 @@ class EEGViewer(QWidget):
         # Active Channels
         self._syncing_x = False
         self.channel_checkboxes = {}
-        self.channel_enabled = {ch: True for ch in CHANNEL_NAMES}
+        self.channel_show   = {ch: True for ch in CHANNEL_NAMES}
+        self.channel_record = {ch: True for ch in CHANNEL_NAMES}
         self.available_channels = CHANNEL_NAMES[:]
 
         # Correlation
@@ -457,17 +461,46 @@ class EEGViewer(QWidget):
         self.btn_connect.clicked.connect(self.connect_stream)
         self.btn_disconnect.clicked.connect(self.disconnect_stream)
 
-        # ACTIVE CHANNELS
-        channel_box = QGroupBox("Active channels")
-        cl2 = QVBoxLayout(channel_box)
-        self.channel_checkboxes = {}
-        for ch in CHANNEL_NAMES:
-            cb = QCheckBox(ch)
-            cb.setChecked(True)
-            cb.setEnabled(True)
-            cb.stateChanged.connect(lambda state, c=ch: self.toggle_channel(c, state))
-            cl2.addWidget(cb)
-            self.channel_checkboxes[ch] = cb
+        # CHANNEL TABLE  (Channel | Show | Record)
+        channel_box = QGroupBox("Channels")
+        from PyQt5.QtWidgets import QGridLayout
+        grid = QGridLayout(channel_box)
+        grid.setSpacing(2)
+        grid.setContentsMargins(4, 4, 4, 4)
+
+        # Header row
+        for col, label in enumerate(("Channel", "Show", "Rec")):
+            hdr = QLabel(label)
+            hdr.setAlignment(Qt.AlignCenter)
+            grid.addWidget(hdr, 0, col)
+
+        self.show_checkboxes   = {}
+        self.record_checkboxes = {}
+
+        for row_i, ch in enumerate(CHANNEL_NAMES, start=1):
+            name_lbl = QLabel(ch)
+            name_lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+
+            cb_show = QCheckBox()
+            cb_show.setChecked(True)
+            cb_show.setStyleSheet("QCheckBox { margin-left: auto; margin-right: auto; }")
+            cb_show.stateChanged.connect(lambda state, c=ch: self.toggle_show(c, state))
+
+            cb_rec = QCheckBox()
+            cb_rec.setChecked(True)
+            cb_rec.setStyleSheet("QCheckBox { margin-left: auto; margin-right: auto; }")
+            cb_rec.stateChanged.connect(lambda state, c=ch: self.toggle_record(c, state))
+
+            grid.addWidget(name_lbl, row_i, 0)
+            grid.addWidget(cb_show,  row_i, 1, Qt.AlignHCenter)
+            grid.addWidget(cb_rec,   row_i, 2, Qt.AlignHCenter)
+
+            self.show_checkboxes[ch]   = cb_show
+            self.record_checkboxes[ch] = cb_rec
+
+        # Keep channel_checkboxes pointing at show boxes for legacy compat
+        self.channel_checkboxes = self.show_checkboxes
+
         left.addWidget(channel_box)
 
         # Spearman 2ch
@@ -603,12 +636,12 @@ class EEGViewer(QWidget):
         if not self.plots:
             return
 
-        active_channels = self.get_active_channels()
+        shown_channels = self.get_shown_channels()
 
         with self.disp_lock:
             snapshots = {
                 ch: list(self.disp_buffers[ch])
-                for ch in active_channels
+                for ch in shown_channels
                 if ch in self.disp_buffers
             }
 
@@ -616,7 +649,7 @@ class EEGViewer(QWidget):
             if ch not in self.curves:
                 continue
 
-            if ch not in active_channels:
+            if ch not in shown_channels:
                 self.curves[ch].setData([], [])
                 continue
 
@@ -673,9 +706,11 @@ class EEGViewer(QWidget):
         self.fs = int(info.nominal_srate())
 
         for ch in CHANNEL_NAMES:
-            if ch in self.channel_checkboxes:
-                self.channel_checkboxes[ch].setEnabled(False)
-                self.channel_enabled[ch] = self.channel_checkboxes[ch].isChecked()
+            if ch in self.show_checkboxes:
+                self.show_checkboxes[ch].setEnabled(False)
+                self.record_checkboxes[ch].setEnabled(False)
+                self.channel_show[ch]   = self.show_checkboxes[ch].isChecked()
+                self.channel_record[ch] = self.record_checkboxes[ch].isChecked()
 
         self._setup_plots()
         self._start_log()
@@ -687,9 +722,11 @@ class EEGViewer(QWidget):
         self._stop_log()
 
         for ch in CHANNEL_NAMES:
-            if ch in self.channel_checkboxes:
-                self.channel_checkboxes[ch].setEnabled(True)
-                self.channel_enabled[ch] = self.channel_checkboxes[ch].isChecked()
+            if ch in self.show_checkboxes:
+                self.show_checkboxes[ch].setEnabled(True)
+                self.record_checkboxes[ch].setEnabled(True)
+                self.channel_show[ch]   = self.show_checkboxes[ch].isChecked()
+                self.channel_record[ch] = self.record_checkboxes[ch].isChecked()
 
     # ──────────────────────────────────────────
     # PLOTS
@@ -742,7 +779,7 @@ class EEGViewer(QWidget):
 
             vb.sigXRangeChanged.connect(self._sync_x_ranges)
 
-            p.setVisible(self.channel_enabled.get(ch, True))
+            p.setVisible(self.channel_show.get(ch, True))
 
     # ──────────────────────────────────────────
     # DATA THREAD
@@ -768,6 +805,7 @@ class EEGViewer(QWidget):
             disp_buffers=self.disp_buffers,
             corr_job_q=self.corr_job_q,
             active_channels_getter=self.get_active_channels,
+            shown_channels_getter=self.get_shown_channels,
         )
         self.data_thread.start()
 
@@ -889,9 +927,9 @@ class EEGViewer(QWidget):
             self.corr_window = None
 
         for ch in CHANNEL_NAMES:
-            if ch in self.channel_checkboxes:
-                self.channel_checkboxes[ch].setEnabled(True)
-                self.channel_enabled[ch] = self.channel_checkboxes[ch].isChecked()
+            if ch in self.show_checkboxes:
+                self.show_checkboxes[ch].setEnabled(True)
+                self.record_checkboxes[ch].setEnabled(True)
 
         self.indicator.setStyleSheet("font-size:24px; color:gray;")
         print("Correlation stopped")
@@ -900,8 +938,15 @@ class EEGViewer(QWidget):
     # CHANNEL SWITCHER
     # ──────────────────────────────────────────
 
+    def get_shown_channels(self):
+        return [ch for ch in self.available_channels if self.channel_show.get(ch, False)]
+
+    def get_recorded_channels(self):
+        return [ch for ch in self.available_channels if self.channel_record.get(ch, False)]
+
+    # Keep legacy name used by DataThread active_channels_getter
     def get_active_channels(self):
-        return [ch for ch in self.available_channels if self.channel_enabled.get(ch, False)]
+        return self.get_recorded_channels()
 
     def _sync_x_ranges(self, changed_vb, x_range):
         if self._syncing_x:
@@ -921,16 +966,18 @@ class EEGViewer(QWidget):
         finally:
             self._syncing_x = False
 
-    def toggle_channel(self, ch, state):
-        enabled = (state == Qt.Checked)
-        self.channel_enabled[ch] = enabled
+    def toggle_show(self, ch, state):
+        self.channel_show[ch] = (state == Qt.Checked)
 
         if ch in self.plots:
-            self.plots[ch].setVisible(enabled)
+            self.plots[ch].setVisible(self.channel_show[ch])
 
         with self.disp_lock:
-            if ch in self.disp_buffers and not enabled:
+            if ch in self.disp_buffers and not self.channel_show[ch]:
                 self.disp_buffers[ch].clear()
+
+    def toggle_record(self, ch, state):
+        self.channel_record[ch] = (state == Qt.Checked)
 
         if self.inlet and self.data_thread:
             self._restart_log_for_active_channels()
