@@ -707,8 +707,6 @@ class EEGViewer(QWidget):
 
         for ch in CHANNEL_NAMES:
             if ch in self.show_checkboxes:
-                self.show_checkboxes[ch].setEnabled(False)
-                self.record_checkboxes[ch].setEnabled(False)
                 self.channel_show[ch]   = self.show_checkboxes[ch].isChecked()
                 self.channel_record[ch] = self.record_checkboxes[ch].isChecked()
 
@@ -723,8 +721,6 @@ class EEGViewer(QWidget):
 
         for ch in CHANNEL_NAMES:
             if ch in self.show_checkboxes:
-                self.show_checkboxes[ch].setEnabled(True)
-                self.record_checkboxes[ch].setEnabled(True)
                 self.channel_show[ch]   = self.show_checkboxes[ch].isChecked()
                 self.channel_record[ch] = self.record_checkboxes[ch].isChecked()
 
@@ -925,11 +921,6 @@ class EEGViewer(QWidget):
         if self.corr_window:
             self.corr_window.close()
             self.corr_window = None
-
-        for ch in CHANNEL_NAMES:
-            if ch in self.show_checkboxes:
-                self.show_checkboxes[ch].setEnabled(True)
-                self.record_checkboxes[ch].setEnabled(True)
 
         self.indicator.setStyleSheet("font-size:24px; color:gray;")
         print("Correlation stopped")
