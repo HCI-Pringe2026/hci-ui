@@ -9,7 +9,6 @@ Thread layout:
   GUI thread   — Qt timer at 25 fps redraws plots and processes corr results.
   Sound thread — daemon, runs beep loop when condition is met.
 """
-
 import sys
 import time
 import csv
@@ -17,6 +16,7 @@ import threading
 import queue
 from datetime import datetime
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 from scipy.stats import spearmanr
@@ -763,8 +763,9 @@ class EEGViewer(QWidget):
     # ──────────────────────────────────────────
 
     def _start_log(self):
+        Path("logs").mkdir(exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_filename = f"log_{ts}.txt"
+        self.log_filename = f"logs/log_{ts}.txt"
         self.log_file = open(self.log_filename, "w", newline="", buffering=65536)
         self.log_writer = csv.writer(self.log_file, delimiter=' ')
 
