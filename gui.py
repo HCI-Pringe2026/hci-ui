@@ -95,10 +95,10 @@ class TimeZoomViewBox(pg.ViewBox):
             current_width = x_max - x_min
             new_width = current_width / zoom_factor
 
-            # Anchor: keep x_max (right edge) fixed
+            # Anchor: keep x_max (right edge, = 0) fixed
             new_x_min = x_max - new_width
             self.enableAutoRange(axis='x', enable=False)
-            self.setXRange(new_x_min, x_max, padding=0)
+            self.setXRange(new_x_min, 0, padding=0)
             ev.accept()
 
     def mouseDragEvent(self, ev, axis=None):
@@ -627,7 +627,8 @@ class EEGViewer(QWidget):
 
             gain = self.gains[ch].value()
             arr = np.asarray(data_list, dtype=np.float32) * gain
-            x = np.arange(len(arr), dtype=np.float32)
+            n = len(arr)
+            x = np.arange(-(n - 1), 1, dtype=np.float32)
             self.curves[ch].setData(x, arr)
 
     def _process_corr_results(self):
@@ -722,7 +723,7 @@ class EEGViewer(QWidget):
             p.setMenuEnabled(False)
             p.setMouseEnabled(x=True, y=True)
             p.enableAutoRange(x=False, y=True)
-            p.setXRange(0, disp_size - 1, padding=0)
+            p.setXRange(-(disp_size - 1), 0, padding=0)
 
             if i < len(self.available_channels) - 1:
                 p.getAxis("bottom").setStyle(showValues=False)
