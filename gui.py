@@ -468,32 +468,57 @@ class EEGViewer(QWidget):
         grid.setSpacing(2)
         grid.setContentsMargins(4, 4, 4, 4)
 
-        # Header row
+        # Header row — labels
         for col, label in enumerate(("Channel", "Show", "Rec")):
             hdr = QLabel(label)
             hdr.setAlignment(Qt.AlignCenter)
             grid.addWidget(hdr, 0, col)
 
+        # Helper: wrap a bare QCheckBox in a centered container so the
+        # indicator pixel-aligns regardless of implicit label spacing.
+        def _centered_cb(cb):
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setAlignment(Qt.AlignHCenter)
+            h.addWidget(cb)
+            return w
+
+        # "All" toggle row
+        all_lbl = QLabel("All")
+        all_lbl.setAlignment(Qt.AlignCenter)
+        grid.addWidget(all_lbl, 1, 0)
+
+        self.cb_show_all = QCheckBox()
+        self.cb_show_all.setChecked(True)
+        self.cb_show_all.setTristate(False)
+        self.cb_show_all.stateChanged.connect(self._toggle_all_show)
+        grid.addWidget(_centered_cb(self.cb_show_all), 1, 1)
+
+        self.cb_rec_all = QCheckBox()
+        self.cb_rec_all.setChecked(True)
+        self.cb_rec_all.setTristate(False)
+        self.cb_rec_all.stateChanged.connect(self._toggle_all_record)
+        grid.addWidget(_centered_cb(self.cb_rec_all), 1, 2)
+
         self.show_checkboxes   = {}
         self.record_checkboxes = {}
 
-        for row_i, ch in enumerate(CHANNEL_NAMES, start=1):
+        for row_i, ch in enumerate(CHANNEL_NAMES, start=2):
             name_lbl = QLabel(ch)
             name_lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
 
             cb_show = QCheckBox()
             cb_show.setChecked(True)
-            cb_show.setStyleSheet("QCheckBox { margin-left: auto; margin-right: auto; }")
             cb_show.stateChanged.connect(lambda state, c=ch: self.toggle_show(c, state))
 
             cb_rec = QCheckBox()
             cb_rec.setChecked(True)
-            cb_rec.setStyleSheet("QCheckBox { margin-left: auto; margin-right: auto; }")
             cb_rec.stateChanged.connect(lambda state, c=ch: self.toggle_record(c, state))
 
-            grid.addWidget(name_lbl, row_i, 0)
-            grid.addWidget(cb_show,  row_i, 1, Qt.AlignHCenter)
-            grid.addWidget(cb_rec,   row_i, 2, Qt.AlignHCenter)
+            grid.addWidget(name_lbl,              row_i, 0)
+            grid.addWidget(_centered_cb(cb_show), row_i, 1)
+            grid.addWidget(_centered_cb(cb_rec),  row_i, 2)
 
             self.show_checkboxes[ch]   = cb_show
             self.record_checkboxes[ch] = cb_rec
@@ -956,6 +981,30 @@ class EEGViewer(QWidget):
                 vb.setXRange(x0, x1, padding=0)
         finally:
             self._syncing_x = False
+
+    def _toggle_all_show(self, state):
+        checked = (state == Qt.Checked)
+        for ch, cb in self.show_checkboxes.items():
+            cb.blockSignals(True)
+            cb.setChecked(checked)
+            cb.blockSignals(False)
+            self.channel_show[ch] = checked
+            if ch in self.plots:
+                self.plots[ch].setVisible(checked)
+            if not checked:
+                with self.disp_lock:
+                    if ch in self.disp_buffers:
+                        self.disp_buffers[ch].clear()
+
+    def _toggle_all_record(self, state):
+        checked = (state == Qt.Checked)
+        for ch, cb in self.record_checkboxes.items():
+            cb.blockSignals(True)
+            cb.setChecked(checked)
+            cb.blockSignals(False)
+            self.channel_record[ch] = checked
+        if self.inlet and self.data_thread:
+            self._restart_log_for_active_channels()
 
     def toggle_show(self, ch, state):
         self.channel_show[ch] = (state == Qt.Checked)
