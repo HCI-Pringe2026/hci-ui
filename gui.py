@@ -802,6 +802,10 @@ class EEGViewer(QWidget):
 
             p.setVisible(self.channel_show.get(ch, True))
 
+        # prevent graphs from collapsing by creating empty label to add into plot widget
+        self._layout_guard = pg.LabelItem("")
+        self.plot_widget.addItem(self._layout_guard, row=len(self.available_channels), col=0)
+
     # ──────────────────────────────────────────
     # DATA THREAD
     # ──────────────────────────────────────────
