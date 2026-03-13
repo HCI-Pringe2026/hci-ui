@@ -10,60 +10,79 @@ Thread layout:
   Sound thread — daemon, runs beep loop when condition is met.
 """
 
-import sys
-import time
+import contextlib
 import csv
-import threading
 import queue
-from datetime import datetime
+import sys
+import threading
+import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
+from typing import override
 
 import numpy as np
-from scipy.stats import spearmanr
-
-from pylsl import StreamInlet, resolve_streams
-
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QListWidget, QLabel, QMessageBox,
-    QDoubleSpinBox, QSpinBox, QComboBox, QCheckBox,
-    QScrollArea, QGroupBox, QFileDialog
-)
-from PyQt5.QtCore import QTimer, Qt
-
 import pyqtgraph as pg
+from pylsl import StreamInlet, resolve_streams
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
 from pyqtgraph import GraphicsLayoutWidget
-
+from scipy.stats import spearmanr
 
 # ──────────────────────────────────────────────
 # CONFIG
 # ──────────────────────────────────────────────
 
 CHANNEL_NAMES = [
-    "FP1-A1", "FP2-A2",
-    "F3-A1",  "F4-A2",
-    "C3-A1",  "C4-A2",
-    "P3-A1",  "P4-A2",
-    "O1-A1",  "O2-A2",
-    "F7-A1",  "F8-A2",
-    "T3-A1",  "T4-A2",
-    "T5-A1",  "T6-A2",
-    "ECG"
+    "FP1-A1",
+    "FP2-A2",
+    "F3-A1",
+    "F4-A2",
+    "C3-A1",
+    "C4-A2",
+    "P3-A1",
+    "P4-A2",
+    "O1-A1",
+    "O2-A2",
+    "F7-A1",
+    "F8-A2",
+    "T3-A1",
+    "T4-A2",
+    "T5-A1",
+    "T6-A2",
+    "ECG",
 ]
 N_CH = len(CHANNEL_NAMES)
 
-GUI_FPS       = 25          # частота перерисовки GUI
-DISPLAY_SEC   = 5           # сколько секунд показываем на графике
-LOG_FLUSH_N   = 50          # flush лог-файла раз в N строк
+GUI_FPS = 25  # частота перерисовки GUI
+DISPLAY_SEC = 5  # сколько секунд показываем на графике
+LOG_FLUSH_N = 50  # flush лог-файла раз в N строк
 
 
 def ch_color(i):
     return pg.intColor(i, hues=N_CH)
 
+
 # ──────────────────────────────────────────────
 # TIMEZOOM VIEWBOX
 # ──────────────────────────────────────────────
+
 
 class TimeZoomViewBox(pg.ViewBox):
     """
@@ -71,15 +90,17 @@ class TimeZoomViewBox(pg.ViewBox):
     Ctrl + Wheel             -> zoom Y for current plot only
     Double click             -> reset Y autorange
     """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, enableMenu=False, **kwargs)
         self.setMouseMode(self.PanMode)
         self.setDefaultPadding(0.0)
 
-    def wheelEvent(self, ev, axis=None):
+    @override
+    def wheelEvent(self, ev, _axis=None):
         mods = QApplication.keyboardModifiers()
         if mods & Qt.ControlModifier:
-            self.enableAutoRange(axis='y', enable=False)
+            self.enableAutoRange(axis="y", enable=False)
             super().wheelEvent(ev, axis=1)
         else:
             # Zoom X anchored to the right edge
@@ -97,20 +118,24 @@ class TimeZoomViewBox(pg.ViewBox):
 
             # Anchor: keep x_max (right edge, = 0) fixed
             new_x_min = x_max - new_width
-            self.enableAutoRange(axis='x', enable=False)
+            self.enableAutoRange(axis="x", enable=False)
             self.setXRange(new_x_min, 0, padding=0)
             ev.accept()
 
-    def mouseDragEvent(self, ev, axis=None):
+    @override
+    def mouseDragEvent(self, ev, _axis=None):
         ev.accept()
 
+    @override
     def mouseDoubleClickEvent(self, ev):
-        self.enableAutoRange(axis='y', enable=True)
+        self.enableAutoRange(axis="y", enable=True)
         ev.accept()
+
 
 # ──────────────────────────────────────────────
 # DATA THREAD  (LSL + file IO)
 # ──────────────────────────────────────────────
+
 
 class DataThread(threading.Thread):
     """
@@ -121,34 +146,41 @@ class DataThread(threading.Thread):
     накоплении step_size новых сэмплов кладёт снимок в corr_job_q.
     """
 
-    def __init__(self, inlet, fs, log_file, log_writer,
-                 disp_lock, disp_buffers,
-                 corr_job_q,
-                 active_channels_getter,
-                 shown_channels_getter):
+    def __init__(
+        self,
+        inlet,
+        fs,
+        log_file,
+        log_writer,
+        disp_lock,
+        disp_buffers,
+        corr_job_q,
+        active_channels_getter,
+        shown_channels_getter,
+    ):
         super().__init__(daemon=True)
-        self.inlet                  = inlet
-        self.fs                     = fs
-        self.log_file               = log_file
-        self.log_writer             = log_writer
-        self.disp_lock              = disp_lock
-        self.disp_buffers           = disp_buffers
-        self.corr_job_q             = corr_job_q
-        self.active_channels_getter = active_channels_getter   # recorded channels
-        self.shown_channels_getter  = shown_channels_getter    # displayed channels
+        self.inlet = inlet
+        self.fs = fs
+        self.log_file = log_file
+        self.log_writer = log_writer
+        self.disp_lock = disp_lock
+        self.disp_buffers = disp_buffers
+        self.corr_job_q = corr_job_q
+        self.active_channels_getter = active_channels_getter  # recorded channels
+        self.shown_channels_getter = shown_channels_getter  # displayed channels
 
         self.running = True
 
         # корреляция
-        self.corr_active  = False
-        self.window_size  = 500
-        self.step_size    = 50
-        self.corr_ring    = deque()
+        self.corr_active = False
+        self.window_size = 500
+        self.step_size = 50
+        self.corr_ring = deque()
         self.samples_step = 0
 
         # RGB ring
         self.rgb_active = False
-        self.rgb_rings  = [deque() for _ in range(6)]
+        self.rgb_rings = [deque() for _ in range(6)]
         self.rgb_ch_idx = list(range(6))
 
         self._flush_cnt = 0
@@ -159,12 +191,12 @@ class DataThread(threading.Thread):
             if not chunk:
                 continue
 
-            active_channels = self.active_channels_getter()   # channels to record
-            shown_channels  = self.shown_channels_getter()    # channels to display
-            active_indices  = [CHANNEL_NAMES.index(ch) for ch in active_channels]
+            active_channels = self.active_channels_getter()  # channels to record
+            shown_channels = self.shown_channels_getter()  # channels to display
+            active_indices = [CHANNEL_NAMES.index(ch) for ch in active_channels]
 
             rows = []
-            disp_batch   = {ch: [] for ch in shown_channels}
+            disp_batch = {ch: [] for ch in shown_channels}
 
             for sample, ts in zip(chunk, timestamps):
                 t = ts if ts else time.time()
@@ -190,10 +222,8 @@ class DataThread(threading.Thread):
                     if self.samples_step >= self.step_size:
                         self.samples_step = 0
                         if len(self.corr_ring) >= self.window_size:
-                            try:
+                            with contextlib.suppress(queue.Full):
                                 self.corr_job_q.put_nowait((list(self.corr_ring), t))
-                            except queue.Full:
-                                pass
 
                 # RGB
                 if self.rgb_active:
@@ -218,20 +248,21 @@ class DataThread(threading.Thread):
 
     def set_corr(self, active, window_size=500, step_size=50):
         self.window_size = window_size
-        self.step_size   = step_size
-        self.corr_ring   = deque(maxlen=window_size)
+        self.step_size = step_size
+        self.corr_ring = deque(maxlen=window_size)
         self.samples_step = 0
         self.corr_active = active
 
     def set_rgb(self, active, ch_indices, window_size=500):
         self.rgb_ch_idx = ch_indices
-        self.rgb_rings  = [deque(maxlen=window_size) for _ in range(6)]
+        self.rgb_rings = [deque(maxlen=window_size) for _ in range(6)]
         self.rgb_active = active
 
 
 # ──────────────────────────────────────────────
 # CORRELATION THREAD
 # ──────────────────────────────────────────────
+
 
 class CorrThread(threading.Thread):
     """
@@ -242,17 +273,16 @@ class CorrThread(threading.Thread):
     GUI-тика, поэтому задержка звука минимальна.
     """
 
-    def __init__(self, i1, i2, job_q, result_q, corr_file, corr_writer, lock,
-                 sound_callback=None):
+    def __init__(self, i1, i2, job_q, result_q, corr_file, corr_writer, lock, sound_callback=None):
         super().__init__(daemon=True)
-        self.i1             = i1
-        self.i2             = i2
-        self.job_q          = job_q
-        self.result_q       = result_q
-        self.corr_file      = corr_file
-        self.corr_writer    = corr_writer
-        self.lock           = lock
-        self.running        = True
+        self.i1 = i1
+        self.i2 = i2
+        self.job_q = job_q
+        self.result_q = result_q
+        self.corr_file = corr_file
+        self.corr_writer = corr_writer
+        self.lock = lock
+        self.running = True
         self.sound_callback = sound_callback
 
     def run(self):
@@ -284,10 +314,8 @@ class CorrThread(threading.Thread):
                     self.corr_writer.writerow([f"{t:.6f}", f"{r:.6f}"])
                     self.corr_file.flush()
 
-            try:
+            with contextlib.suppress(queue.Full):
                 self.result_q.put_nowait((r, t))
-            except queue.Full:
-                pass
 
     def stop(self):
         self.running = False
@@ -297,8 +325,9 @@ class CorrThread(threading.Thread):
 # CORRELATION WINDOW
 # ──────────────────────────────────────────────
 
+
 class CorrelationWindow(QWidget):
-    MAXLEN = 50   # хранить и рисовать только 50 последних окон
+    MAXLEN = 50  # хранить и рисовать только 50 последних окон
 
     def __init__(self):
         super().__init__()
@@ -317,18 +346,18 @@ class CorrelationWindow(QWidget):
         self.curve = self.plot.plot(pen=pg.mkPen("y", width=2))
         layout.addWidget(self.plot)
 
-        self._thr_pos = pg.InfiniteLine(angle=0, pen=pg.mkPen('g', width=1, style=Qt.DashLine))
-        self._thr_neg = pg.InfiniteLine(angle=0, pen=pg.mkPen('g', width=1, style=Qt.DashLine))
+        self._thr_pos = pg.InfiniteLine(angle=0, pen=pg.mkPen("g", width=1, style=Qt.DashLine))
+        self._thr_neg = pg.InfiniteLine(angle=0, pen=pg.mkPen("g", width=1, style=Qt.DashLine))
         self.plot.addItem(self._thr_pos)
         self.plot.addItem(self._thr_neg)
         self._thr_pos.setVisible(False)
         self._thr_neg.setVisible(False)
 
         # Хранение — простые numpy-массивы фиксированного размера (ring-buffer)
-        self._ys  = np.full(self.MAXLEN, np.nan, dtype=np.float32)
-        self._ptr = 0      # указатель записи
-        self._cnt = 0      # сколько точек уже добавлено
-        self._idx = 0      # глобальный индекс окна (для оси X)
+        self._ys = np.full(self.MAXLEN, np.nan, dtype=np.float32)
+        self._ptr = 0  # указатель записи
+        self._cnt = 0  # сколько точек уже добавлено
+        self._idx = 0  # глобальный индекс окна (для оси X)
 
     def add_point(self, r):
         self._ys[self._ptr] = r
@@ -338,7 +367,7 @@ class CorrelationWindow(QWidget):
 
         # Упорядоченный срез от старых к новым
         if self._cnt < self.MAXLEN:
-            ys = self._ys[:self._cnt]
+            ys = self._ys[: self._cnt]
             xs = np.arange(self._idx - self._cnt, self._idx, dtype=np.int32)
         else:
             ys = np.roll(self._ys, -self._ptr)
@@ -373,6 +402,7 @@ class CorrelationWindow(QWidget):
 # MAIN WINDOW
 # ──────────────────────────────────────────────
 
+
 class EEGViewer(QWidget):
 
     def __init__(self):
@@ -381,48 +411,48 @@ class EEGViewer(QWidget):
         self.resize(1600, 900)
 
         # LSL
-        self.inlet   = None
+        self.inlet = None
         self.streams = []
-        self.fs      = 250
+        self.fs = 250
 
         # Display deques — shared with DataThread (under disp_lock)
-        self.disp_lock    = threading.Lock()
-        self.disp_buffers = {}   # filled in setup_plots()
+        self.disp_lock = threading.Lock()
+        self.disp_buffers = {}  # filled in setup_plots()
 
         # Background threads
         self.data_thread = None
         self.corr_thread = None
 
         # Log
-        self.log_file     = None
-        self.log_writer   = None
+        self.log_file = None
+        self.log_writer = None
         self.log_filename = None
 
         # Active Channels
         self._syncing_x = False
         self.channel_checkboxes = {}
-        self.channel_show   = {ch: True for ch in CHANNEL_NAMES}
-        self.channel_record = {ch: True for ch in CHANNEL_NAMES}
+        self.channel_show = dict.fromkeys(CHANNEL_NAMES, True)
+        self.channel_record = dict.fromkeys(CHANNEL_NAMES, True)
         self.available_channels = CHANNEL_NAMES[:]
 
         # Correlation
-        self.corr_active  = False
-        self.corr_job_q   = queue.Queue(maxsize=4)   # не больше 4 задач в очереди
+        self.corr_active = False
+        self.corr_job_q = queue.Queue(maxsize=4)  # не больше 4 задач в очереди
         self.corr_result_q = queue.Queue()
-        self.corr_file    = None
-        self.corr_writer  = None
-        self.corr_lock    = threading.Lock()
-        self.corr_window  = None
+        self.corr_file = None
+        self.corr_writer = None
+        self.corr_lock = threading.Lock()
+        self.corr_window = None
 
         # RGB (вычисляется в DataThread или отдельно — здесь в GUI-потоке раз в 200 мс)
-        self.rgb_active    = False
-        self.rgb_file      = None
-        self.rgb_writer    = None
+        self.rgb_active = False
+        self.rgb_file = None
+        self.rgb_writer = None
         self._rgb_tick_cnt = 0
 
-        self.plots  = {}
+        self.plots = {}
         self.curves = {}
-        self.gains  = {}
+        self.gains = {}
 
         self._build_ui()
         self._setup_timers()
@@ -450,8 +480,8 @@ class EEGViewer(QWidget):
         left.addWidget(self.stream_list)
 
         row = QHBoxLayout()
-        self.btn_refresh    = QPushButton("Refresh")
-        self.btn_connect    = QPushButton("Connect")
+        self.btn_refresh = QPushButton("Refresh")
+        self.btn_connect = QPushButton("Connect")
         self.btn_disconnect = QPushButton("Disconnect")
         for b in (self.btn_refresh, self.btn_connect, self.btn_disconnect):
             row.addWidget(b)
@@ -464,6 +494,7 @@ class EEGViewer(QWidget):
         # CHANNEL TABLE  (Channel | Show | Record)
         channel_box = QGroupBox("Channels")
         from PyQt5.QtWidgets import QGridLayout
+
         grid = QGridLayout(channel_box)
         grid.setSpacing(2)
         grid.setContentsMargins(4, 4, 4, 4)
@@ -501,7 +532,7 @@ class EEGViewer(QWidget):
         self.cb_rec_all.stateChanged.connect(self._toggle_all_record)
         grid.addWidget(_centered_cb(self.cb_rec_all), 1, 2)
 
-        self.show_checkboxes   = {}
+        self.show_checkboxes = {}
         self.record_checkboxes = {}
 
         for row_i, ch in enumerate(CHANNEL_NAMES, start=2):
@@ -516,11 +547,11 @@ class EEGViewer(QWidget):
             cb_rec.setChecked(True)
             cb_rec.stateChanged.connect(lambda state, c=ch: self.toggle_record(c, state))
 
-            grid.addWidget(name_lbl,              row_i, 0)
+            grid.addWidget(name_lbl, row_i, 0)
             grid.addWidget(_centered_cb(cb_show), row_i, 1)
-            grid.addWidget(_centered_cb(cb_rec),  row_i, 2)
+            grid.addWidget(_centered_cb(cb_rec), row_i, 2)
 
-            self.show_checkboxes[ch]   = cb_show
+            self.show_checkboxes[ch] = cb_show
             self.record_checkboxes[ch] = cb_rec
 
         # Keep channel_checkboxes pointing at show boxes for legacy compat
@@ -533,20 +564,26 @@ class EEGViewer(QWidget):
         cl = QVBoxLayout(corr_box)
 
         cl.addWidget(QLabel("Channel 1"))
-        self.ch1 = QComboBox(); self.ch1.addItems(CHANNEL_NAMES)
+        self.ch1 = QComboBox()
+        self.ch1.addItems(CHANNEL_NAMES)
         cl.addWidget(self.ch1)
 
         cl.addWidget(QLabel("Channel 2"))
-        self.ch2 = QComboBox(); self.ch2.addItems(CHANNEL_NAMES)
+        self.ch2 = QComboBox()
+        self.ch2.addItems(CHANNEL_NAMES)
         self.ch2.setCurrentIndex(1)
         cl.addWidget(self.ch2)
 
         cl.addWidget(QLabel("Window (samples)"))
-        self.win = QSpinBox(); self.win.setRange(50, 5000); self.win.setValue(500)
+        self.win = QSpinBox()
+        self.win.setRange(50, 5000)
+        self.win.setValue(500)
         cl.addWidget(self.win)
 
         cl.addWidget(QLabel("Step (samples)"))
-        self.step = QSpinBox(); self.step.setRange(1, 2000); self.step.setValue(50)
+        self.step = QSpinBox()
+        self.step.setRange(1, 2000)
+        self.step.setValue(50)
         cl.addWidget(self.step)
 
         # Sound condition
@@ -562,21 +599,30 @@ class EEGViewer(QWidget):
         sl.addWidget(self.invert_check)
 
         sl.addWidget(QLabel("Threshold T"))
-        self.thr = QDoubleSpinBox(); self.thr.setRange(0, 1); self.thr.setValue(0.7); self.thr.setSingleStep(0.05)
+        self.thr = QDoubleSpinBox()
+        self.thr.setRange(0, 1)
+        self.thr.setValue(0.7)
+        self.thr.setSingleStep(0.05)
         sl.addWidget(self.thr)
 
         sl.addWidget(QLabel("Range min"))
-        self.range_min = QDoubleSpinBox(); self.range_min.setRange(-1, 1); self.range_min.setValue(-0.3); self.range_min.setSingleStep(0.05)
+        self.range_min = QDoubleSpinBox()
+        self.range_min.setRange(-1, 1)
+        self.range_min.setValue(-0.3)
+        self.range_min.setSingleStep(0.05)
         sl.addWidget(self.range_min)
 
         sl.addWidget(QLabel("Range max"))
-        self.range_max = QDoubleSpinBox(); self.range_max.setRange(-1, 1); self.range_max.setValue(0.8); self.range_max.setSingleStep(0.05)
+        self.range_max = QDoubleSpinBox()
+        self.range_max.setRange(-1, 1)
+        self.range_max.setValue(0.8)
+        self.range_max.setSingleStep(0.05)
         sl.addWidget(self.range_max)
 
         cl.addWidget(sg)
 
         self.btn_start_corr = QPushButton("Start correlation")
-        self.btn_stop_corr  = QPushButton("Stop correlation")
+        self.btn_stop_corr = QPushButton("Stop correlation")
         cl.addWidget(self.btn_start_corr)
         cl.addWidget(self.btn_stop_corr)
 
@@ -598,13 +644,17 @@ class EEGViewer(QWidget):
         rl = QVBoxLayout(rgb_box)
         self.rgb_ch = []
         for i in range(6):
-            cb = QComboBox(); cb.addItems(CHANNEL_NAMES)
-            if i < N_CH: cb.setCurrentIndex(i)
+            cb = QComboBox()
+            cb.addItems(CHANNEL_NAMES)
+            if i < N_CH:
+                cb.setCurrentIndex(i)
             self.rgb_ch.append(cb)
-            rl.addWidget(QLabel(f"Channel {i+1}")); rl.addWidget(cb)
+            rl.addWidget(QLabel(f"Channel {i+1}"))
+            rl.addWidget(cb)
         self.btn_rgb_start = QPushButton("Start RGB")
-        self.btn_rgb_stop  = QPushButton("Stop RGB")
-        rl.addWidget(self.btn_rgb_start); rl.addWidget(self.btn_rgb_stop)
+        self.btn_rgb_stop = QPushButton("Stop RGB")
+        rl.addWidget(self.btn_rgb_start)
+        rl.addWidget(self.btn_rgb_stop)
         self.rgb_bar = QLabel()
         self.rgb_bar.setFixedHeight(25)
         self.rgb_bar.setStyleSheet("background-color:black;")
@@ -636,7 +686,7 @@ class EEGViewer(QWidget):
                     old = self.disp_buffers[ch]
                     new = deque(old, maxlen=disp_size)
                     self.disp_buffers[ch] = new
-        for ch, g in self.gains.items():
+        for _ch, g in self.gains.items():
             g.setValue(gain)
 
     # ──────────────────────────────────────────
@@ -647,7 +697,7 @@ class EEGViewer(QWidget):
         # Основной таймер GUI — только рисует
         self.draw_timer = QTimer()
         self.draw_timer.timeout.connect(self._gui_tick)
-        self.draw_timer.start(1000 // GUI_FPS)   # 40 мс
+        self.draw_timer.start(1000 // GUI_FPS)  # 40 мс
 
     # ──────────────────────────────────────────
     # GUI TICK  (только отрисовка + corr results)
@@ -664,11 +714,7 @@ class EEGViewer(QWidget):
         shown_channels = self.get_shown_channels()
 
         with self.disp_lock:
-            snapshots = {
-                ch: list(self.disp_buffers[ch])
-                for ch in shown_channels
-                if ch in self.disp_buffers
-            }
+            snapshots = {ch: list(self.disp_buffers[ch]) for ch in shown_channels if ch in self.disp_buffers}
 
         for ch in CHANNEL_NAMES:
             if ch not in self.curves:
@@ -704,7 +750,7 @@ class EEGViewer(QWidget):
                 break
 
         if last_r is not None:
-            cond  = self._check_sound_condition(last_r)
+            cond = self._check_sound_condition(last_r)
             color = "lime" if cond else "gray"
             self.indicator.setStyleSheet(f"font-size:24px; color:{color};")
 
@@ -716,9 +762,7 @@ class EEGViewer(QWidget):
         self.stream_list.clear()
         self.streams = resolve_streams()
         for s in self.streams:
-            self.stream_list.addItem(
-                f"{s.name()} | {s.channel_count()} ch | {s.nominal_srate()} Hz"
-            )
+            self.stream_list.addItem(f"{s.name()} | {s.channel_count()} ch | {s.nominal_srate()} Hz")
 
     def connect_stream(self):
         idx = self.stream_list.currentRow()
@@ -732,7 +776,7 @@ class EEGViewer(QWidget):
 
         for ch in CHANNEL_NAMES:
             if ch in self.show_checkboxes:
-                self.channel_show[ch]   = self.show_checkboxes[ch].isChecked()
+                self.channel_show[ch] = self.show_checkboxes[ch].isChecked()
                 self.channel_record[ch] = self.record_checkboxes[ch].isChecked()
 
         self._setup_plots()
@@ -746,7 +790,7 @@ class EEGViewer(QWidget):
 
         for ch in CHANNEL_NAMES:
             if ch in self.show_checkboxes:
-                self.channel_show[ch]   = self.show_checkboxes[ch].isChecked()
+                self.channel_show[ch] = self.show_checkboxes[ch].isChecked()
                 self.channel_record[ch] = self.record_checkboxes[ch].isChecked()
 
     # ──────────────────────────────────────────
@@ -848,11 +892,11 @@ class EEGViewer(QWidget):
         Path("logs").mkdir(exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_filename = f"logs/log_{ts}.txt"
-        self.log_file = open(self.log_filename, "w", newline="", buffering=65536)
-        self.log_writer = csv.writer(self.log_file, delimiter=' ')
+        self.log_file = open(self.log_filename, "w", newline="", buffering=65536)  # noqa: SIM115
+        self.log_writer = csv.writer(self.log_file, delimiter=" ")
 
         active_channels = self.get_active_channels()
-        self.log_writer.writerow(["timestamp"] + active_channels)
+        self.log_writer.writerow(["timestamp", *active_channels])
 
         print("Log started:", self.log_filename)
 
@@ -869,29 +913,34 @@ class EEGViewer(QWidget):
 
     def start_correlation(self):
         if not self.inlet or not self.data_thread:
-            QMessageBox.warning(self, "LSL", "Not connected!"); return
+            QMessageBox.warning(self, "LSL", "Not connected!")
+            return
 
-        win  = self.win.value()
-        stp  = self.step.value()
-        ch1  = self.ch1.currentText()
-        ch2  = self.ch2.currentText()
-        i1   = CHANNEL_NAMES.index(ch1)
-        i2   = CHANNEL_NAMES.index(ch2)
+        win = self.win.value()
+        stp = self.step.value()
+        ch1 = self.ch1.currentText()
+        ch2 = self.ch2.currentText()
+        i1 = CHANNEL_NAMES.index(ch1)
+        i2 = CHANNEL_NAMES.index(ch2)
 
         # файл корреляции
-        ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = f"corr_{ch1}_{ch2}_win{win}_step{stp}_{ts}.txt"
-        self.corr_file   = open(fname, "w", newline="", buffering=8192)
-        self.corr_writer = csv.writer(self.corr_file, delimiter=' ')
+        self.corr_file = open(fname, "w", newline="", buffering=8192)  # noqa: SIM115
+        self.corr_writer = csv.writer(self.corr_file, delimiter=" ")
         self.corr_writer.writerow(["timestamp", f"spearman_{ch1}_{ch2}"])
 
         # очищаем очереди
         while not self.corr_job_q.empty():
-            try: self.corr_job_q.get_nowait()
-            except queue.Empty: break
+            try:
+                self.corr_job_q.get_nowait()
+            except queue.Empty:
+                break
         while not self.corr_result_q.empty():
-            try: self.corr_result_q.get_nowait()
-            except queue.Empty: break
+            try:
+                self.corr_result_q.get_nowait()
+            except queue.Empty:
+                break
 
         # запускаем CorrThread
         if self.corr_thread and self.corr_thread.is_alive():
@@ -902,12 +951,13 @@ class EEGViewer(QWidget):
         self._cache_sound_params()
 
         self.corr_thread = CorrThread(
-            i1=i1, i2=i2,
-            job_q          = self.corr_job_q,
-            result_q       = self.corr_result_q,
-            corr_file      = self.corr_file,
-            corr_writer    = self.corr_writer,
-            lock           = self.corr_lock,
+            i1=i1,
+            i2=i2,
+            job_q=self.corr_job_q,
+            result_q=self.corr_result_q,
+            corr_file=self.corr_file,
+            corr_writer=self.corr_writer,
+            lock=self.corr_lock,
         )
         self.corr_thread.start()
 
@@ -926,7 +976,8 @@ class EEGViewer(QWidget):
         else:
             self.corr_window.set_threshold_lines("range", self.range_min.value(), self.range_max.value())
 
-        self.corr_window.show(); self.corr_window.raise_()
+        self.corr_window.show()
+        self.corr_window.raise_()
         self.indicator.setStyleSheet("font-size:24px; color:gray;")
         print(f"Correlation started: {ch1} vs {ch2} win={win} step={stp}")
 
@@ -974,7 +1025,7 @@ class EEGViewer(QWidget):
         self._syncing_x = True
         try:
             x0, x1 = x_range
-            for ch, p in self.plots.items():
+            for _ch, p in self.plots.items():
                 if not p.isVisible():
                     continue
                 vb = p.getViewBox()
@@ -987,7 +1038,7 @@ class EEGViewer(QWidget):
             self._syncing_x = False
 
     def _toggle_all_show(self, state):
-        checked = (state == Qt.Checked)
+        checked = state == Qt.Checked
         for ch, cb in self.show_checkboxes.items():
             cb.blockSignals(True)
             cb.setChecked(checked)
@@ -1001,7 +1052,7 @@ class EEGViewer(QWidget):
                         self.disp_buffers[ch].clear()
 
     def _toggle_all_record(self, state):
-        checked = (state == Qt.Checked)
+        checked = state == Qt.Checked
         for ch, cb in self.record_checkboxes.items():
             cb.blockSignals(True)
             cb.setChecked(checked)
@@ -1011,7 +1062,7 @@ class EEGViewer(QWidget):
             self._restart_log_for_active_channels()
 
     def toggle_show(self, ch, state):
-        self.channel_show[ch] = (state == Qt.Checked)
+        self.channel_show[ch] = state == Qt.Checked
 
         if ch in self.plots:
             self.plots[ch].setVisible(self.channel_show[ch])
@@ -1021,7 +1072,7 @@ class EEGViewer(QWidget):
                 self.disp_buffers[ch].clear()
 
     def toggle_record(self, ch, state):
-        self.channel_record[ch] = (state == Qt.Checked)
+        self.channel_record[ch] = state == Qt.Checked
 
         if self.inlet and self.data_thread:
             self._restart_log_for_active_channels()
@@ -1040,10 +1091,7 @@ class EEGViewer(QWidget):
         self._snd_rmax = self.range_max.value()
 
     def _check_sound_condition(self, r):
-        if self._snd_mode == 0:
-            cond = abs(r) > self._snd_thr
-        else:
-            cond = self._snd_rmin <= r <= self._snd_rmax
+        cond = abs(r) > self._snd_thr if self._snd_mode == 0 else self._snd_rmin <= r <= self._snd_rmax
 
         if self._snd_invert:
             cond = not cond
@@ -1055,9 +1103,10 @@ class EEGViewer(QWidget):
 
     def start_rgb(self):
         if not self.data_thread:
-            QMessageBox.warning(self, "LSL", "Not connected!"); return
+            QMessageBox.warning(self, "LSL", "Not connected!")
+            return
 
-        w   = self.win.value()
+        w = self.win.value()
         idx = []
         for cb in self.rgb_ch:
             ch = cb.currentText()
@@ -1066,10 +1115,10 @@ class EEGViewer(QWidget):
         self.data_thread.set_rgb(True, idx, w)
         self.rgb_active = True
 
-        ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = f"rgb_win{w}_step{self.step.value()}_{ts}.txt"
-        self.rgb_file   = open(fname, "w", newline="", buffering=8192)
-        self.rgb_writer = csv.writer(self.rgb_file, delimiter=' ')
+        self.rgb_file = open(fname, "w", newline="", buffering=8192)  # noqa: SIM115
+        self.rgb_writer = csv.writer(self.rgb_file, delimiter=" ")
         self.rgb_writer.writerow(["timestamp", "R", "G", "B"])
         self._rgb_tick_cnt = 0
         print("RGB started:", fname)
@@ -1077,16 +1126,17 @@ class EEGViewer(QWidget):
         # RGB вычисляется в отдельном таймере — реже, чтобы не нагружать GUI
         self._rgb_timer = QTimer()
         self._rgb_timer.timeout.connect(self._compute_rgb_tick)
-        self._rgb_timer.start(200)   # 5 раз/сек достаточно для цвета
+        self._rgb_timer.start(200)  # 5 раз/сек достаточно для цвета
 
     def stop_rgb(self):
         self.rgb_active = False
-        if hasattr(self, '_rgb_timer'):
+        if hasattr(self, "_rgb_timer"):
             self._rgb_timer.stop()
         if self.data_thread:
             self.data_thread.set_rgb(False, [], 0)
         if self.rgb_file:
-            self.rgb_file.flush(); self.rgb_file.close()
+            self.rgb_file.flush()
+            self.rgb_file.close()
             self.rgb_file = self.rgb_writer = None
         self.rgb_bar.setStyleSheet("background-color:black;")
         print("RGB stopped")
@@ -1095,7 +1145,7 @@ class EEGViewer(QWidget):
         if not self.data_thread or not self.rgb_active:
             return
 
-        w    = self.win.value()
+        w = self.win.value()
         rings = self.data_thread.rgb_rings
 
         if any(len(rb) < w for rb in rings):
@@ -1103,19 +1153,20 @@ class EEGViewer(QWidget):
 
         rgb_vals = []
         for i in range(0, 6, 2):
-            x = np.array(rings[i],     dtype=np.float64)[-w:]
+            x = np.array(rings[i], dtype=np.float64)[-w:]
             y = np.array(rings[i + 1], dtype=np.float64)[-w:]
             if np.all(x == x[0]) or np.all(y == y[0]):
                 rv = 0.0
             else:
                 rv, _ = spearmanr(x, y)
-                if not np.isfinite(rv): rv = 0.0
+                if not np.isfinite(rv):
+                    rv = 0.0
             rgb_vals.append(abs(rv))
 
-        R = int(np.clip(rgb_vals[0], 0, 1) * 255)
-        G = int(np.clip(rgb_vals[1], 0, 1) * 255)
-        B = int(np.clip(rgb_vals[2], 0, 1) * 255)
-        self.rgb_bar.setStyleSheet(f"background-color: rgb({R},{G},{B});")
+        r = int(np.clip(rgb_vals[0], 0, 1) * 255)
+        g = int(np.clip(rgb_vals[1], 0, 1) * 255)
+        b = int(np.clip(rgb_vals[2], 0, 1) * 255)
+        self.rgb_bar.setStyleSheet(f"background-color: rgb({r},{g},{b});")
 
         if self.rgb_writer:
             self.rgb_writer.writerow([self._rgb_tick_cnt, rgb_vals[0], rgb_vals[1], rgb_vals[2]])
@@ -1126,14 +1177,12 @@ class EEGViewer(QWidget):
     # ──────────────────────────────────────────
 
     def load_offline_file(self):
-        fname, _ = QFileDialog.getOpenFileName(
-            self, "Select log file", "", "Text/CSV (*.txt *.csv)"
-        )
+        fname, _ = QFileDialog.getOpenFileName(self, "Select log file", "", "Text/CSV (*.txt *.csv)")
         if not fname:
             return
 
         try:
-            with open(fname, "r") as f:
+            with open(fname) as f:
                 header = f.readline().strip().split()
 
             if len(header) < 2 or header[0] != "timestamp":
@@ -1164,10 +1213,7 @@ class EEGViewer(QWidget):
         out = fname.rsplit(".", 1)[0] + "_offline_corr.txt"
 
         with open(out, "w") as f:
-            hdr = ["window"] + [
-                f"{names[i]}_{names[j]}"
-                for i in range(n_ch) for j in range(i + 1, n_ch)
-            ]
+            hdr = ["window"] + [f"{names[i]}_{names[j]}" for i in range(n_ch) for j in range(i + 1, n_ch)]
             f.write(" ".join(hdr) + "\n")
 
             idx = 0
@@ -1176,7 +1222,7 @@ class EEGViewer(QWidget):
                 vals = []
                 for i in range(n_ch):
                     for j in range(i + 1, n_ch):
-                        x, y = sig[idx:idx + w, i], sig[idx:idx + w, j]
+                        x, y = sig[idx : idx + w, i], sig[idx : idx + w, j]
                         if np.all(x == x[0]) or np.all(y == y[0]):
                             rv = 0.0
                         else:
@@ -1196,6 +1242,7 @@ class EEGViewer(QWidget):
     # CLOSE
     # ──────────────────────────────────────────
 
+    @override
     def closeEvent(self, event):
         self.stop_correlation()
         self._stop_data_thread()
@@ -1204,6 +1251,7 @@ class EEGViewer(QWidget):
         # Удаляем временный WAV файл
         try:
             import os
+
             os.unlink(self._tone_path)
         except Exception:
             pass
@@ -1213,6 +1261,7 @@ class EEGViewer(QWidget):
 # ──────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────
+
 
 def main():
     app = QApplication(sys.argv)

@@ -54,14 +54,15 @@ select = [
     "RET",
     "SIM",
     "ARG",
-    "PTH",
     "RUF"
 ]
 ignore = [
     "PIE796",
     "B028",
+    "RUF002",
     "RUF018",
     "N818",
     "B905",
-    "RUF012"
+    "RUF012",
+    "T201"
 ]

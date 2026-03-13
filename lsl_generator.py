@@ -1,10 +1,11 @@
-import numpy as np
 import time
+
+import numpy as np
 from pylsl import StreamInfo, StreamOutlet
 
 
 def main():
-    info = StreamInfo('OscillatorStream', 'EEG', 20, 500, 'float32', 'oscillator123')
+    info = StreamInfo("OscillatorStream", "EEG", 20, 500, "float32", "oscillator123")
     outlet = StreamOutlet(info)
 
     print("Streaming started. Channel 0 oscillates, channels 1-19 are zeros.")
