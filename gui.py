@@ -68,7 +68,6 @@ class TimeZoomViewBox(pg.ViewBox):
     """
     Wheel / touchpad scroll  -> zoom X
     Ctrl + Wheel             -> zoom Y for current plot only
-    Left mouse drag          -> pan X
     Double click             -> reset Y autorange
     """
     def __init__(self, *args, **kwargs):
@@ -85,10 +84,7 @@ class TimeZoomViewBox(pg.ViewBox):
             super().wheelEvent(ev, axis=0)
 
     def mouseDragEvent(self, ev, axis=None):
-        if ev.button() == Qt.LeftButton:
-            super().mouseDragEvent(ev, axis=0)
-        else:
-            ev.ignore()
+        ev.accept()
 
     def mouseDoubleClickEvent(self, ev):
         self.enableAutoRange(axis='y', enable=True)
@@ -385,7 +381,6 @@ class EEGViewer(QWidget):
         self._syncing_x = False
         self.channel_checkboxes = {}
         self.channel_enabled = {ch: True for ch in CHANNEL_NAMES}
-        self.plot_rows = {}
         self.available_channels = CHANNEL_NAMES[:]
 
         # Correlation
@@ -396,24 +391,6 @@ class EEGViewer(QWidget):
         self.corr_writer  = None
         self.corr_lock    = threading.Lock()
         self.corr_window  = None
-
-        # Sound
-        self.sound_active  = False
-        self._pending_sound = False
-        # Записываем WAV во временный файл — SND_ASYNC требует файл, не bytes
-        import tempfile, os
-        self._tone_tmp = tempfile.NamedTemporaryFile(
-            suffix=".wav", delete=False
-        )
-        self._tone_tmp.flush()
-        self._tone_tmp.close()
-        self._tone_path = self._tone_tmp.name
-        # Кэши параметров звука — читаются из CorrThread (не Qt-виджеты!)
-        self._snd_mode   = 0
-        self._snd_invert = False
-        self._snd_thr    = 0.7
-        self._snd_rmin   = -0.3
-        self._snd_rmax   = 0.8
 
         # RGB (вычисляется в DataThread или отдельно — здесь в GUI-потоке раз в 200 мс)
         self.rgb_active    = False
@@ -568,27 +545,6 @@ class EEGViewer(QWidget):
         # RIGHT plots
         self.plot_widget = GraphicsLayoutWidget()
         main.addWidget(self.plot_widget, stretch=1)
-
-        # Zooming
-        zoom_box = QGroupBox("Zoom / Gain")
-        zl = QVBoxLayout(zoom_box)
-
-        self.gain_spin = QDoubleSpinBox()
-        self.gain_spin.setRange(0.1, 10.0)
-        self.gain_spin.setSingleStep(0.1)
-        self.gain_spin.setValue(1.0)
-        self.gain_spin.valueChanged.connect(self.update_zoom)
-        zl.addWidget(QLabel("Vertical gain"))
-        zl.addWidget(self.gain_spin)
-
-        self.time_spin = QSpinBox()
-        self.time_spin.setRange(1, 30)
-        self.time_spin.setValue(DISPLAY_SEC)
-        self.time_spin.valueChanged.connect(self.update_zoom)
-        zl.addWidget(QLabel("Time window (sec)"))
-        zl.addWidget(self.time_spin)
-
-        left.addWidget(zoom_box)
 
     # ──────────────────────────────────────────
     # ZOOMERS
