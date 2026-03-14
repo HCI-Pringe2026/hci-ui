@@ -1,5 +1,5 @@
 # Установка проекта
-``bash
+```bash
 $ poetry install --all-groups
 $ pre-commit install
 ```
