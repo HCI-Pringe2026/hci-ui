@@ -3,7 +3,6 @@ import queue
 import threading
 from collections import deque
 from datetime import datetime
-from pathlib import Path
 from typing import override
 
 import numpy as np
@@ -518,7 +517,6 @@ class EEGViewer(QWidget):
     # Logging
 
     def _start_log(self):
-        Path("logs").mkdir(exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_filename = f"logs/log_{ts}.txt"
         self.log_file = open(self.log_filename, "w", newline="", buffering=65536)  # noqa: SIM115
@@ -714,7 +712,7 @@ class EEGViewer(QWidget):
         self.rgb_active = True
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"rgb_win{w}_step{self.step.value()}_{ts}.txt"
+        fname = f"rgb/rgb_win{w}_step{self.step.value()}_{ts}.txt"
         self.rgb_file = open(fname, "w", newline="", buffering=8192)  # noqa: SIM115
         self.rgb_writer = csv.writer(self.rgb_file, delimiter=" ")
         self.rgb_writer.writerow(["timestamp", "R", "G", "B"])
