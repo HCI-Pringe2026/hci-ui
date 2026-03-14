@@ -178,7 +178,7 @@ class EEGViewer(QWidget):
     def _start_log(self):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_filename = f"logs/log_{ts}.txt"
-        self.log_file = open(self.log_filename, "w", newline="", buffering=65536)  # noqa: SIM115
+        self.log_file = open(self.log_filename, "w", newline="", buffering=65536)
         self.log_writer = csv.writer(self.log_file, delimiter=" ")
         self.log_writer.writerow(["timestamp", *self.get_active_channels()])
         print("Log started:", self.log_filename)

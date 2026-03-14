@@ -36,7 +36,7 @@ class RGBController:
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = f"logs/rgb_win{win}_step{step}_{ts}.txt"
-        self.rgb_file = open(fname, "w", newline="", buffering=8192)  # noqa: SIM115
+        self.rgb_file = open(fname, "w", newline="", buffering=8192)
         self.rgb_writer = csv.writer(self.rgb_file, delimiter=" ")
         self.rgb_writer.writerow(["timestamp", "R", "G", "B"])
         self._tick_cnt = 0

@@ -49,7 +49,7 @@ class CorrelationController:
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = f"logs/corr_{ch1}_{ch2}_win{win}_step{stp}_{ts}.txt"
-        self.corr_file = open(fname, "w", newline="", buffering=8192)  # noqa: SIM115
+        self.corr_file = open(fname, "w", newline="", buffering=8192)
         self.corr_writer = csv.writer(self.corr_file, delimiter=" ")
         self.corr_writer.writerow(["timestamp", f"spearman_{ch1}_{ch2}"])
 
