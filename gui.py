@@ -95,6 +95,7 @@ class TimeZoomViewBox(pg.ViewBox):
         super().__init__(*args, enableMenu=False, **kwargs)
         self.setMouseMode(self.PanMode)
         self.setDefaultPadding(0.0)
+        self._yscale_spinbox = None  # set externally after plot creation
 
     @override
     def wheelEvent(self, ev, _axis=None):
@@ -129,6 +130,10 @@ class TimeZoomViewBox(pg.ViewBox):
     @override
     def mouseDoubleClickEvent(self, ev):
         self.enableAutoRange(axis="y", enable=True)
+        if self._yscale_spinbox is not None:
+            self._yscale_spinbox.blockSignals(True)
+            self._yscale_spinbox.setValue(0)
+            self._yscale_spinbox.blockSignals(False)
         ev.accept()
 
 
@@ -453,6 +458,7 @@ class EEGViewer(QWidget):
         self.plots = {}
         self.curves = {}
         self.gains = {}
+        self.y_scale_spinboxes = {}  # per-channel max-amplitude spinbox
 
         self._build_ui()
         self._setup_timers()
@@ -810,6 +816,7 @@ class EEGViewer(QWidget):
         self.plots.clear()
         self.curves.clear()
         self.gains.clear()
+        self.y_scale_spinboxes.clear()
 
         with self.disp_lock:
             self.disp_buffers.clear()
@@ -849,6 +856,47 @@ class EEGViewer(QWidget):
             g.setRange(0.1, 1000)
             g.setValue(1.0)
             self.gains[ch] = g
+
+            # ── per-channel Y-scale spinbox (0 = autorange) ──────────────
+            ys = QDoubleSpinBox()
+            ys.setRange(0, 1_000_000)
+            ys.setValue(0)
+            ys.setDecimals(1)
+            ys.setSingleStep(10)
+            ys.setToolTip(f"{ch}: max amplitude (0 = autorange)")
+            ys.setFixedWidth(80)
+            ys.setFixedHeight(22)
+            ys.setStyleSheet(
+                "QDoubleSpinBox { font-size: 9px; padding: 0px 2px; "
+                "background: rgba(30,30,30,200); color: #ddd; border: 1px solid #555; }"
+            )
+            # Parent the proxy to the PlotItem so it inherits visibility
+            # and moves with the plot — no manual repositioning needed.
+            from PyQt5.QtWidgets import QGraphicsProxyWidget
+
+            proxy = QGraphicsProxyWidget(p)
+            proxy.setWidget(ys)
+            proxy.setZValue(10)
+
+            # Position in PlotItem-local coords: top-right corner.
+            # geometryChanged fires on every resize so the spinbox tracks.
+            def _place(px=proxy, plot=p):
+                r = plot.boundingRect()
+                px.setPos(r.right() - px.widget().width() - 4, r.top() + 2)
+
+            _place()
+            p.geometryChanged.connect(_place)
+
+            def _on_yscale_changed(val, plot=p):
+                if val == 0:
+                    plot.enableAutoRange(axis="y", enable=True)
+                else:
+                    plot.enableAutoRange(axis="y", enable=False)
+                    plot.setYRange(-val, val, padding=0)
+
+            ys.valueChanged.connect(_on_yscale_changed)
+            self.y_scale_spinboxes[ch] = ys
+            vb._yscale_spinbox = ys  # so double-click can reset it
 
             vb.sigXRangeChanged.connect(self._sync_x_ranges)
 
