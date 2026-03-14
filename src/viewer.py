@@ -1,21 +1,6 @@
-"""
-lsl_test_V5.py  —  EEG viewer with clean thread separation
-
-Thread layout:
-  DataThread   — pulls LSL chunks, writes log file, feeds display deques
-                 and corr ring; runs at full LSL rate, never touches GUI.
-  CorrThread   — waits for corr jobs on a queue, computes Spearman,
-                 writes corr file, pushes results back to GUI via a result queue.
-  GUI thread   — Qt timer at 25 fps redraws plots and processes corr results.
-  Sound thread — daemon, runs beep loop when condition is met.
-"""
-
-import contextlib
 import csv
 import queue
-import sys
 import threading
-import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -26,11 +11,12 @@ import pyqtgraph as pg
 from pylsl import StreamInlet, resolve_streams
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QGraphicsProxyWidget,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -45,367 +31,10 @@ from PyQt5.QtWidgets import (
 from pyqtgraph import GraphicsLayoutWidget
 from scipy.stats import spearmanr
 
-# ──────────────────────────────────────────────
-# CONFIG
-# ──────────────────────────────────────────────
-
-CHANNEL_NAMES = [
-    "FP1-A1",
-    "FP2-A2",
-    "F3-A1",
-    "F4-A2",
-    "C3-A1",
-    "C4-A2",
-    "P3-A1",
-    "P4-A2",
-    "O1-A1",
-    "O2-A2",
-    "F7-A1",
-    "F8-A2",
-    "T3-A1",
-    "T4-A2",
-    "T5-A1",
-    "T6-A2",
-    "ECG",
-]
-N_CH = len(CHANNEL_NAMES)
-
-GUI_FPS = 25  # частота перерисовки GUI
-DISPLAY_SEC = 5  # сколько секунд показываем на графике
-LOG_FLUSH_N = 50  # flush лог-файла раз в N строк
-
-
-def ch_color(i):
-    return pg.intColor(i, hues=N_CH)
-
-
-# ──────────────────────────────────────────────
-# TIMEZOOM VIEWBOX
-# ──────────────────────────────────────────────
-
-
-class TimeZoomViewBox(pg.ViewBox):
-    """
-    Wheel / touchpad scroll  -> zoom X, anchored to right edge
-    Ctrl + Wheel             -> zoom Y for current plot only
-    Double click             -> reset Y autorange
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, enableMenu=False, **kwargs)
-        self.setMouseMode(self.PanMode)
-        self.setDefaultPadding(0.0)
-        self._yscale_spinbox = None  # set externally after plot creation
-
-    @override
-    def wheelEvent(self, ev, _axis=None):
-        mods = QApplication.keyboardModifiers()
-        if mods & Qt.ControlModifier:
-            self.enableAutoRange(axis="y", enable=False)
-            super().wheelEvent(ev, axis=1)
-        else:
-            # Zoom X anchored to the right edge
-            # ViewBox receives QGraphicsSceneWheelEvent which uses delta(), not angleDelta()
-            delta = ev.delta()
-            if delta == 0:
-                ev.accept()
-                return
-
-            zoom_factor = 1.15 if delta > 0 else 1.0 / 1.15
-
-            x_min, x_max = self.viewRange()[0]
-            current_width = x_max - x_min
-            new_width = current_width / zoom_factor
-
-            # Anchor: keep x_max (right edge, = 0) fixed
-            new_x_min = x_max - new_width
-            self.enableAutoRange(axis="x", enable=False)
-            self.setXRange(new_x_min, 0, padding=0)
-            ev.accept()
-
-    @override
-    def mouseDragEvent(self, ev, _axis=None):
-        ev.accept()
-
-    @override
-    def mouseDoubleClickEvent(self, ev):
-        self.enableAutoRange(axis="y", enable=True)
-        if self._yscale_spinbox is not None:
-            self._yscale_spinbox.blockSignals(True)
-            self._yscale_spinbox.setValue(0)
-            self._yscale_spinbox.blockSignals(False)
-        ev.accept()
-
-
-# ──────────────────────────────────────────────
-# DATA THREAD  (LSL + file IO)
-# ──────────────────────────────────────────────
-
-
-class DataThread(threading.Thread):
-    """
-    Живёт пока running=True.
-    Забирает чанки из LSL inlet, пишет в лог-файл и обновляет
-    display-deques (общие с GUI, защищены lock'ом).
-    Если корреляция активна — кладёт сэмплы в corr_ring и при
-    накоплении step_size новых сэмплов кладёт снимок в corr_job_q.
-    """
-
-    def __init__(
-        self,
-        inlet,
-        fs,
-        log_file,
-        log_writer,
-        disp_lock,
-        disp_buffers,
-        corr_job_q,
-        active_channels_getter,
-        shown_channels_getter,
-    ):
-        super().__init__(daemon=True)
-        self.inlet = inlet
-        self.fs = fs
-        self.log_file = log_file
-        self.log_writer = log_writer
-        self.disp_lock = disp_lock
-        self.disp_buffers = disp_buffers
-        self.corr_job_q = corr_job_q
-        self.active_channels_getter = active_channels_getter  # recorded channels
-        self.shown_channels_getter = shown_channels_getter  # displayed channels
-
-        self.running = True
-
-        # корреляция
-        self.corr_active = False
-        self.window_size = 500
-        self.step_size = 50
-        self.corr_ring = deque()
-        self.samples_step = 0
-
-        # RGB ring
-        self.rgb_active = False
-        self.rgb_rings = [deque() for _ in range(6)]
-        self.rgb_ch_idx = list(range(6))
-
-        self._flush_cnt = 0
-
-    def run(self):
-        while self.running:
-            chunk, timestamps = self.inlet.pull_chunk(timeout=0.02, max_samples=256)
-            if not chunk:
-                continue
-
-            active_channels = self.active_channels_getter()  # channels to record
-            shown_channels = self.shown_channels_getter()  # channels to display
-            active_indices = [CHANNEL_NAMES.index(ch) for ch in active_channels]
-
-            rows = []
-            disp_batch = {ch: [] for ch in shown_channels}
-
-            for sample, ts in zip(chunk, timestamps):
-                t = ts if ts else time.time()
-
-                # лог: только записываемые каналы
-                row = [f"{t:.6f}"]
-                for i in active_indices:
-                    if i < len(sample):
-                        row.append(f"{sample[i]:.4f}")
-                    else:
-                        row.append("0.0000")
-                rows.append(row)
-
-                # display batch — все показываемые каналы
-                for i, ch in enumerate(CHANNEL_NAMES):
-                    if ch in disp_batch and i < len(sample):
-                        disp_batch[ch].append(sample[i])
-
-                # corr ring
-                if self.corr_active:
-                    self.corr_ring.append(sample)
-                    self.samples_step += 1
-                    if self.samples_step >= self.step_size:
-                        self.samples_step = 0
-                        if len(self.corr_ring) >= self.window_size:
-                            with contextlib.suppress(queue.Full):
-                                self.corr_job_q.put_nowait((list(self.corr_ring), t))
-
-                # RGB
-                if self.rgb_active:
-                    for k, ci in enumerate(self.rgb_ch_idx):
-                        if ci < len(sample):
-                            self.rgb_rings[k].append(sample[ci])
-
-            for row in rows:
-                self.log_writer.writerow(row)
-            self._flush_cnt += len(rows)
-            if self._flush_cnt >= LOG_FLUSH_N:
-                self.log_file.flush()
-                self._flush_cnt = 0
-
-            with self.disp_lock:
-                for ch in shown_channels:
-                    if ch in self.disp_buffers:
-                        self.disp_buffers[ch].extend(disp_batch[ch])
-
-    def stop(self):
-        self.running = False
-
-    def set_corr(self, active, window_size=500, step_size=50):
-        self.window_size = window_size
-        self.step_size = step_size
-        self.corr_ring = deque(maxlen=window_size)
-        self.samples_step = 0
-        self.corr_active = active
-
-    def set_rgb(self, active, ch_indices, window_size=500):
-        self.rgb_ch_idx = ch_indices
-        self.rgb_rings = [deque(maxlen=window_size) for _ in range(6)]
-        self.rgb_active = active
-
-
-# ──────────────────────────────────────────────
-# CORRELATION THREAD
-# ──────────────────────────────────────────────
-
-
-class CorrThread(threading.Thread):
-    """
-    Ждёт снимки из job_q, считает Spearman, пишет файл,
-    кладёт (r, t) в result_q для GUI.
-
-    sound_callback(r) вызывается СРАЗУ после вычисления — без ожидания
-    GUI-тика, поэтому задержка звука минимальна.
-    """
-
-    def __init__(self, i1, i2, job_q, result_q, corr_file, corr_writer, lock, sound_callback=None):
-        super().__init__(daemon=True)
-        self.i1 = i1
-        self.i2 = i2
-        self.job_q = job_q
-        self.result_q = result_q
-        self.corr_file = corr_file
-        self.corr_writer = corr_writer
-        self.lock = lock
-        self.running = True
-        self.sound_callback = sound_callback
-
-    def run(self):
-        while self.running:
-            try:
-                window, t = self.job_q.get(timeout=0.1)
-            except queue.Empty:
-                continue
-
-            i1, i2 = self.i1, self.i2
-            try:
-                x = np.array([s[i1] for s in window if i1 < len(s)], dtype=np.float64)
-                y = np.array([s[i2] for s in window if i2 < len(s)], dtype=np.float64)
-            except Exception:
-                continue
-
-            if len(x) < 2 or len(y) < 2:
-                continue
-
-            if np.all(x == x[0]) or np.all(y == y[0]):
-                r = 0.0
-            else:
-                r, _ = spearmanr(x, y)
-                if not np.isfinite(r):
-                    r = 0.0
-
-            with self.lock:
-                if self.corr_writer:
-                    self.corr_writer.writerow([f"{t:.6f}", f"{r:.6f}"])
-                    self.corr_file.flush()
-
-            with contextlib.suppress(queue.Full):
-                self.result_q.put_nowait((r, t))
-
-    def stop(self):
-        self.running = False
-
-
-# ──────────────────────────────────────────────
-# CORRELATION WINDOW
-# ──────────────────────────────────────────────
-
-
-class CorrelationWindow(QWidget):
-    MAXLEN = 50  # хранить и рисовать только 50 последних окон
-
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Spearman correlation (online)")
-        self.resize(600, 300)
-
-        layout = QVBoxLayout(self)
-        self.plot = pg.PlotWidget()
-        self.plot.setYRange(-1, 1)
-        self.plot.showGrid(x=True, y=True)
-        self.plot.setLabel("left", "R")
-        self.plot.setLabel("bottom", "Window #")
-        # Отключаем автомасштаб оси X — рисуем фиксированное окно
-        self.plot.setMouseEnabled(x=False, y=False)
-        self.plot.hideButtons()
-        self.curve = self.plot.plot(pen=pg.mkPen("y", width=2))
-        layout.addWidget(self.plot)
-
-        self._thr_pos = pg.InfiniteLine(angle=0, pen=pg.mkPen("g", width=1, style=Qt.DashLine))
-        self._thr_neg = pg.InfiniteLine(angle=0, pen=pg.mkPen("g", width=1, style=Qt.DashLine))
-        self.plot.addItem(self._thr_pos)
-        self.plot.addItem(self._thr_neg)
-        self._thr_pos.setVisible(False)
-        self._thr_neg.setVisible(False)
-
-        # Хранение — простые numpy-массивы фиксированного размера (ring-buffer)
-        self._ys = np.full(self.MAXLEN, np.nan, dtype=np.float32)
-        self._ptr = 0  # указатель записи
-        self._cnt = 0  # сколько точек уже добавлено
-        self._idx = 0  # глобальный индекс окна (для оси X)
-
-    def add_point(self, r):
-        self._ys[self._ptr] = r
-        self._ptr = (self._ptr + 1) % self.MAXLEN
-        self._cnt = min(self._cnt + 1, self.MAXLEN)
-        self._idx += 1
-
-        # Упорядоченный срез от старых к новым
-        if self._cnt < self.MAXLEN:
-            ys = self._ys[: self._cnt]
-            xs = np.arange(self._idx - self._cnt, self._idx, dtype=np.int32)
-        else:
-            ys = np.roll(self._ys, -self._ptr)
-            xs = np.arange(self._idx - self.MAXLEN, self._idx, dtype=np.int32)
-
-        self.curve.setData(xs, ys)
-
-    def set_threshold_lines(self, mode, val1, val2=None):
-        if mode == "abs":
-            self._thr_pos.setValue(val1)
-            self._thr_neg.setValue(-val1)
-            self._thr_pos.setVisible(True)
-            self._thr_neg.setVisible(True)
-        elif mode == "range":
-            self._thr_pos.setValue(val2)
-            self._thr_neg.setValue(val1)
-            self._thr_pos.setVisible(True)
-            self._thr_neg.setVisible(True)
-        else:
-            self._thr_pos.setVisible(False)
-            self._thr_neg.setVisible(False)
-
-    def reset(self):
-        self._ys[:] = np.nan
-        self._ptr = 0
-        self._cnt = 0
-        self._idx = 0
-        self.curve.setData([], [])
-
-
-# ──────────────────────────────────────────────
-# MAIN WINDOW
-# ──────────────────────────────────────────────
+from .config import CHANNEL_NAMES, DISPLAY_SEC, GUI_FPS, N_CH, ch_color
+from .corr_window import CorrelationWindow
+from .threads import CorrThread, DataThread
+from .viewbox import TimeZoomViewBox
 
 
 class EEGViewer(QWidget):
@@ -415,41 +44,34 @@ class EEGViewer(QWidget):
         self.setWindowTitle("LSL EEG — realtime + correlations")
         self.resize(1600, 900)
 
-        # LSL
         self.inlet = None
         self.streams = []
         self.fs = 250
 
-        # Display deques — shared with DataThread (under disp_lock)
         self.disp_lock = threading.Lock()
-        self.disp_buffers = {}  # filled in setup_plots()
+        self.disp_buffers = {}
 
-        # Background threads
         self.data_thread = None
         self.corr_thread = None
 
-        # Log
         self.log_file = None
         self.log_writer = None
         self.log_filename = None
 
-        # Active Channels
         self._syncing_x = False
         self.channel_checkboxes = {}
         self.channel_show = dict.fromkeys(CHANNEL_NAMES, True)
         self.channel_record = dict.fromkeys(CHANNEL_NAMES, True)
         self.available_channels = CHANNEL_NAMES[:]
 
-        # Correlation
         self.corr_active = False
-        self.corr_job_q = queue.Queue(maxsize=4)  # не больше 4 задач в очереди
+        self.corr_job_q = queue.Queue(maxsize=4)
         self.corr_result_q = queue.Queue()
         self.corr_file = None
         self.corr_writer = None
         self.corr_lock = threading.Lock()
         self.corr_window = None
 
-        # RGB (вычисляется в DataThread или отдельно — здесь в GUI-потоке раз в 200 мс)
         self.rgb_active = False
         self.rgb_file = None
         self.rgb_writer = None
@@ -458,20 +80,17 @@ class EEGViewer(QWidget):
         self.plots = {}
         self.curves = {}
         self.gains = {}
-        self.y_scale_spinboxes = {}  # per-channel max-amplitude spinbox
+        self.y_scale_spinboxes = {}
 
         self._build_ui()
         self._setup_timers()
         self.refresh_streams()
 
-    # ──────────────────────────────────────────
     # UI
-    # ──────────────────────────────────────────
 
     def _build_ui(self):
         main = QHBoxLayout(self)
 
-        # LEFT scroll panel
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setFixedWidth(340)
@@ -479,7 +98,6 @@ class EEGViewer(QWidget):
         left = QVBoxLayout(left_panel)
         left.setSpacing(5)
 
-        # LSL streams
         left.addWidget(QLabel("LSL streams"))
         self.stream_list = QListWidget()
         self.stream_list.setMaximumHeight(90)
@@ -497,22 +115,16 @@ class EEGViewer(QWidget):
         self.btn_connect.clicked.connect(self.connect_stream)
         self.btn_disconnect.clicked.connect(self.disconnect_stream)
 
-        # CHANNEL TABLE  (Channel | Show | Record)
         channel_box = QGroupBox("Channels")
-        from PyQt5.QtWidgets import QGridLayout
-
         grid = QGridLayout(channel_box)
         grid.setSpacing(2)
         grid.setContentsMargins(4, 4, 4, 4)
 
-        # Header row — labels
         for col, label in enumerate(("Channel", "Show", "Rec")):
             hdr = QLabel(label)
             hdr.setAlignment(Qt.AlignCenter)
             grid.addWidget(hdr, 0, col)
 
-        # Helper: wrap a bare QCheckBox in a centered container so the
-        # indicator pixel-aligns regardless of implicit label spacing.
         def _centered_cb(cb):
             w = QWidget()
             h = QHBoxLayout(w)
@@ -521,7 +133,6 @@ class EEGViewer(QWidget):
             h.addWidget(cb)
             return w
 
-        # "All" toggle row
         all_lbl = QLabel("All")
         all_lbl.setAlignment(Qt.AlignCenter)
         grid.addWidget(all_lbl, 1, 0)
@@ -560,12 +171,9 @@ class EEGViewer(QWidget):
             self.show_checkboxes[ch] = cb_show
             self.record_checkboxes[ch] = cb_rec
 
-        # Keep channel_checkboxes pointing at show boxes for legacy compat
         self.channel_checkboxes = self.show_checkboxes
-
         left.addWidget(channel_box)
 
-        # Spearman 2ch
         corr_box = QGroupBox("Spearman (2 channels, online)")
         cl = QVBoxLayout(corr_box)
 
@@ -592,7 +200,6 @@ class EEGViewer(QWidget):
         self.step.setValue(50)
         cl.addWidget(self.step)
 
-        # Sound condition
         sg = QGroupBox("Sound condition")
         sl = QVBoxLayout(sg)
 
@@ -645,7 +252,6 @@ class EEGViewer(QWidget):
         self.btn_stop_corr.clicked.connect(self.stop_correlation)
         self.btn_offline.clicked.connect(self.load_offline_file)
 
-        # RGB
         rgb_box = QGroupBox("RGB Spearman (6 channels)")
         rl = QVBoxLayout(rgb_box)
         self.rgb_ch = []
@@ -674,13 +280,8 @@ class EEGViewer(QWidget):
         left_scroll.setWidget(left_panel)
         main.addWidget(left_scroll)
 
-        # RIGHT plots
         self.plot_widget = GraphicsLayoutWidget()
         main.addWidget(self.plot_widget, stretch=1)
-
-    # ──────────────────────────────────────────
-    # ZOOMERS
-    # ──────────────────────────────────────────
 
     def update_zoom(self):
         gain = self.gain_spin.value()
@@ -689,25 +290,18 @@ class EEGViewer(QWidget):
         with self.disp_lock:
             for ch in CHANNEL_NAMES:
                 if ch in self.disp_buffers:
-                    old = self.disp_buffers[ch]
-                    new = deque(old, maxlen=disp_size)
-                    self.disp_buffers[ch] = new
+                    self.disp_buffers[ch] = deque(self.disp_buffers[ch], maxlen=disp_size)
         for _ch, g in self.gains.items():
             g.setValue(gain)
 
-    # ──────────────────────────────────────────
-    # TIMERS
-    # ──────────────────────────────────────────
+    # Timers
 
     def _setup_timers(self):
-        # Основной таймер GUI — только рисует
         self.draw_timer = QTimer()
         self.draw_timer.timeout.connect(self._gui_tick)
-        self.draw_timer.start(1000 // GUI_FPS)  # 40 мс
+        self.draw_timer.start(1000 // GUI_FPS)
 
-    # ──────────────────────────────────────────
-    # GUI TICK  (только отрисовка + corr results)
-    # ──────────────────────────────────────────
+    # GUI tick
 
     def _gui_tick(self):
         self._redraw_plots()
@@ -725,16 +319,13 @@ class EEGViewer(QWidget):
         for ch in CHANNEL_NAMES:
             if ch not in self.curves:
                 continue
-
             if ch not in shown_channels:
                 self.curves[ch].setData([], [])
                 continue
-
             data_list = snapshots.get(ch, [])
             if not data_list:
                 self.curves[ch].setData([], [])
                 continue
-
             gain = self.gains[ch].value()
             arr = np.asarray(data_list, dtype=np.float32) * gain
             n = len(arr)
@@ -742,14 +333,11 @@ class EEGViewer(QWidget):
             self.curves[ch].setData(x, arr)
 
     def _process_corr_results(self):
-        """Забираем ВСЕ готовые r из CorrThread и добавляем каждую точку на график.
-        Звук уже сработал в CorrThread — здесь только индикатор и график."""
         last_r = None
         while True:
             try:
                 r, _ = self.corr_result_q.get_nowait()
                 last_r = r
-                # Добавляем каждую точку — не пропускаем
                 if self.corr_window:
                     self.corr_window.add_point(r)
             except queue.Empty:
@@ -760,9 +348,7 @@ class EEGViewer(QWidget):
             color = "lime" if cond else "gray"
             self.indicator.setStyleSheet(f"font-size:24px; color:{color};")
 
-    # ──────────────────────────────────────────
     # LSL
-    # ──────────────────────────────────────────
 
     def refresh_streams(self):
         self.stream_list.clear()
@@ -807,9 +393,7 @@ class EEGViewer(QWidget):
         for cb in self.record_checkboxes.values():
             cb.setEnabled(True)
 
-    # ──────────────────────────────────────────
-    # PLOTS
-    # ──────────────────────────────────────────
+    # Plots
 
     def _clear_plots(self):
         self.plot_widget.clear()
@@ -857,7 +441,6 @@ class EEGViewer(QWidget):
             g.setValue(1.0)
             self.gains[ch] = g
 
-            # ── per-channel Y-scale spinbox (0 = autorange) ──────────────
             ys = QDoubleSpinBox()
             ys.setRange(0, 1_000_000)
             ys.setValue(0)
@@ -870,16 +453,11 @@ class EEGViewer(QWidget):
                 "QDoubleSpinBox { font-size: 9px; padding: 0px 2px; "
                 "background: rgba(30,30,30,200); color: #ddd; border: 1px solid #555; }"
             )
-            # Parent the proxy to the PlotItem so it inherits visibility
-            # and moves with the plot — no manual repositioning needed.
-            from PyQt5.QtWidgets import QGraphicsProxyWidget
 
             proxy = QGraphicsProxyWidget(p)
             proxy.setWidget(ys)
             proxy.setZValue(10)
 
-            # Position in PlotItem-local coords: top-right corner.
-            # geometryChanged fires on every resize so the spinbox tracks.
             def _place(px=proxy, plot=p):
                 r = plot.boundingRect()
                 px.setPos(r.right() - px.widget().width() - 4, r.top() + 2)
@@ -896,19 +474,16 @@ class EEGViewer(QWidget):
 
             ys.valueChanged.connect(_on_yscale_changed)
             self.y_scale_spinboxes[ch] = ys
-            vb._yscale_spinbox = ys  # so double-click can reset it
+            vb._yscale_spinbox = ys
 
             vb.sigXRangeChanged.connect(self._sync_x_ranges)
 
             p.setVisible(self.channel_show.get(ch, True))
 
-        # prevent graphs from collapsing by creating empty label to add into plot widget
         self._layout_guard = pg.LabelItem("")
         self.plot_widget.addItem(self._layout_guard, row=len(self.available_channels), col=0)
 
-    # ──────────────────────────────────────────
-    # DATA THREAD
-    # ──────────────────────────────────────────
+    # Data thread
 
     def _start_data_thread(self):
         if self.data_thread and self.data_thread.is_alive():
@@ -940,9 +515,7 @@ class EEGViewer(QWidget):
             self.data_thread.join(timeout=1.0)
             self.data_thread = None
 
-    # ──────────────────────────────────────────
-    # LOGGING
-    # ──────────────────────────────────────────
+    # Logging
 
     def _start_log(self):
         Path("logs").mkdir(exist_ok=True)
@@ -950,10 +523,7 @@ class EEGViewer(QWidget):
         self.log_filename = f"logs/log_{ts}.txt"
         self.log_file = open(self.log_filename, "w", newline="", buffering=65536)  # noqa: SIM115
         self.log_writer = csv.writer(self.log_file, delimiter=" ")
-
-        active_channels = self.get_active_channels()
-        self.log_writer.writerow(["timestamp", *active_channels])
-
+        self.log_writer.writerow(["timestamp", *self.get_active_channels()])
         print("Log started:", self.log_filename)
 
     def _stop_log(self):
@@ -963,9 +533,7 @@ class EEGViewer(QWidget):
             self.log_file = self.log_writer = None
             print("Log stopped")
 
-    # ──────────────────────────────────────────
-    # CORRELATION
-    # ──────────────────────────────────────────
+    # Correlation
 
     def start_correlation(self):
         if not self.inlet or not self.data_thread:
@@ -979,31 +547,23 @@ class EEGViewer(QWidget):
         i1 = CHANNEL_NAMES.index(ch1)
         i2 = CHANNEL_NAMES.index(ch2)
 
-        # файл корреляции
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = f"corr_{ch1}_{ch2}_win{win}_step{stp}_{ts}.txt"
         self.corr_file = open(fname, "w", newline="", buffering=8192)  # noqa: SIM115
         self.corr_writer = csv.writer(self.corr_file, delimiter=" ")
         self.corr_writer.writerow(["timestamp", f"spearman_{ch1}_{ch2}"])
 
-        # очищаем очереди
-        while not self.corr_job_q.empty():
-            try:
-                self.corr_job_q.get_nowait()
-            except queue.Empty:
-                break
-        while not self.corr_result_q.empty():
-            try:
-                self.corr_result_q.get_nowait()
-            except queue.Empty:
-                break
+        for q in (self.corr_job_q, self.corr_result_q):
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
 
-        # запускаем CorrThread
         if self.corr_thread and self.corr_thread.is_alive():
             self.corr_thread.stop()
             self.corr_thread.join(timeout=0.5)
 
-        # Кэшируем параметры звука ДО старта CorrThread
         self._cache_sound_params()
 
         self.corr_thread = CorrThread(
@@ -1017,11 +577,9 @@ class EEGViewer(QWidget):
         )
         self.corr_thread.start()
 
-        # говорим DataThread начать накапливать
         self.data_thread.set_corr(True, win, stp)
         self.corr_active = True
 
-        # окно графика
         if self.corr_window is None:
             self.corr_window = CorrelationWindow()
         self.corr_window.reset()
@@ -1061,9 +619,7 @@ class EEGViewer(QWidget):
         self.indicator.setStyleSheet("font-size:24px; color:gray;")
         print("Correlation stopped")
 
-    # ──────────────────────────────────────────
-    # CHANNEL SWITCHER
-    # ──────────────────────────────────────────
+    # Channel visibility / recording
 
     def get_shown_channels(self):
         return [ch for ch in self.available_channels if self.channel_show.get(ch, False)]
@@ -1071,7 +627,6 @@ class EEGViewer(QWidget):
     def get_recorded_channels(self):
         return [ch for ch in self.available_channels if self.channel_record.get(ch, False)]
 
-    # Keep legacy name used by DataThread active_channels_getter
     def get_active_channels(self):
         return self.get_recorded_channels()
 
@@ -1087,8 +642,6 @@ class EEGViewer(QWidget):
                 vb = p.getViewBox()
                 if vb is changed_vb:
                     continue
-                # Do NOT blockSignals — that suppresses the internal axis/grid
-                # repaint. The _syncing_x guard above prevents infinite recursion.
                 vb.setXRange(x0, x1, padding=0)
         finally:
             self._syncing_x = False
@@ -1119,17 +672,14 @@ class EEGViewer(QWidget):
 
     def toggle_show(self, ch, state):
         self.channel_show[ch] = state == Qt.Checked
-
         if ch in self.plots:
             self.plots[ch].setVisible(self.channel_show[ch])
-
         with self.disp_lock:
             if ch in self.disp_buffers and not self.channel_show[ch]:
                 self.disp_buffers[ch].clear()
 
     def toggle_record(self, ch, state):
         self.channel_record[ch] = state == Qt.Checked
-
         if self.inlet and self.data_thread:
             self._restart_log_for_active_channels()
 
@@ -1148,14 +698,9 @@ class EEGViewer(QWidget):
 
     def _check_sound_condition(self, r):
         cond = abs(r) > self._snd_thr if self._snd_mode == 0 else self._snd_rmin <= r <= self._snd_rmax
+        return not cond if self._snd_invert else cond
 
-        if self._snd_invert:
-            cond = not cond
-        return cond
-
-    # ──────────────────────────────────────────
     # RGB
-    # ──────────────────────────────────────────
 
     def start_rgb(self):
         if not self.data_thread:
@@ -1163,10 +708,7 @@ class EEGViewer(QWidget):
             return
 
         w = self.win.value()
-        idx = []
-        for cb in self.rgb_ch:
-            ch = cb.currentText()
-            idx.append(CHANNEL_NAMES.index(ch) if ch in CHANNEL_NAMES else 0)
+        idx = [CHANNEL_NAMES.index(cb.currentText()) if cb.currentText() in CHANNEL_NAMES else 0 for cb in self.rgb_ch]
 
         self.data_thread.set_rgb(True, idx, w)
         self.rgb_active = True
@@ -1179,10 +721,9 @@ class EEGViewer(QWidget):
         self._rgb_tick_cnt = 0
         print("RGB started:", fname)
 
-        # RGB вычисляется в отдельном таймере — реже, чтобы не нагружать GUI
         self._rgb_timer = QTimer()
         self._rgb_timer.timeout.connect(self._compute_rgb_tick)
-        self._rgb_timer.start(200)  # 5 раз/сек достаточно для цвета
+        self._rgb_timer.start(200)
 
     def stop_rgb(self):
         self.rgb_active = False
@@ -1228,9 +769,7 @@ class EEGViewer(QWidget):
             self.rgb_writer.writerow([self._rgb_tick_cnt, rgb_vals[0], rgb_vals[1], rgb_vals[2]])
         self._rgb_tick_cnt += 1
 
-    # ──────────────────────────────────────────
-    # OFFLINE CORRELATION
-    # ──────────────────────────────────────────
+    # Offline correlation
 
     def load_offline_file(self):
         fname, _ = QFileDialog.getOpenFileName(self, "Select log file", "", "Text/CSV (*.txt *.csv)")
@@ -1240,10 +779,8 @@ class EEGViewer(QWidget):
         try:
             with open(fname) as f:
                 header = f.readline().strip().split()
-
             if len(header) < 2 or header[0] != "timestamp":
                 raise ValueError("Invalid log header")
-
             names = header[1:]
             data = np.loadtxt(fname, skiprows=1)
         except Exception as e:
@@ -1252,7 +789,6 @@ class EEGViewer(QWidget):
 
         if data.ndim == 1:
             data = data.reshape(1, -1)
-
         if data.shape[0] < 2:
             QMessageBox.critical(self, "Error", "Not enough rows.")
             return
@@ -1286,7 +822,6 @@ class EEGViewer(QWidget):
                             if not np.isfinite(rv):
                                 rv = 0.0
                         vals.append(rv)
-
                 f.write(str(row) + " " + " ".join(f"{v:.6f}" for v in vals) + "\n")
                 idx += stp
                 row += 1
@@ -1294,9 +829,7 @@ class EEGViewer(QWidget):
         print("Offline corr saved:", out)
         QMessageBox.information(self, "Done", f"Saved:\n{out}")
 
-    # ──────────────────────────────────────────
-    # CLOSE
-    # ──────────────────────────────────────────
+    # Close
 
     @override
     def closeEvent(self, event):
@@ -1304,7 +837,6 @@ class EEGViewer(QWidget):
         self._stop_data_thread()
         self._stop_log()
         self.stop_rgb()
-        # Удаляем временный WAV файл
         try:
             import os
 
@@ -1312,19 +844,3 @@ class EEGViewer(QWidget):
         except Exception:
             pass
         event.accept()
-
-
-# ──────────────────────────────────────────────
-# MAIN
-# ──────────────────────────────────────────────
-
-
-def main():
-    app = QApplication(sys.argv)
-    w = EEGViewer()
-    w.show()
-    sys.exit(app.exec_())
-
-
-if __name__ == "__main__":
-    main()
