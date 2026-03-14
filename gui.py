@@ -99,29 +99,35 @@ class TimeZoomViewBox(pg.ViewBox):
     @override
     def wheelEvent(self, ev, _axis=None):
         mods = QApplication.keyboardModifiers()
+
         if mods & Qt.ControlModifier:
             self.enableAutoRange(axis="y", enable=False)
             super().wheelEvent(ev, axis=1)
-        else:
-            # Zoom X anchored to the right edge
-            # ViewBox receives QGraphicsSceneWheelEvent which uses delta(), not angleDelta()
-            delta = ev.delta()
-            if delta == 0:
-                ev.accept()
-                return
+            return
 
-            zoom_factor = 1.15 if delta > 0 else 1.0 / 1.15
-
-            x_min, x_max = self.viewRange()[0]
-            current_width = x_max - x_min
-            new_width = current_width / zoom_factor
-
-            # Anchor: keep x_max (right edge, = 0) fixed
-            new_x_min = x_max - new_width
-            self.enableAutoRange(axis="x", enable=False)
-            self.setXRange(new_x_min, 0, padding=0)
+        delta = ev.delta()
+        if delta == 0:
             ev.accept()
+            return
 
+        zoom_factor = 1.15 if delta > 0 else 1.0 / 1.15
+
+        x_min, x_max = self.viewRange()[0]
+        current_width = x_max - x_min
+        new_width = current_width / zoom_factor
+
+        # Ограничения на ширину окна X
+        min_width = 20      # минимум 20 сэмплов
+        max_width = 5000    # максимум 5000 сэмплов
+
+        new_width = max(min_width, min(max_width, new_width))
+
+        # фиксируем правый край
+        new_x_min = x_max - new_width
+
+        self.enableAutoRange(axis="x", enable=False)
+        self.setXRange(new_x_min, x_max, padding=0)
+        ev.accept()
     @override
     def mouseDragEvent(self, ev, _axis=None):
         ev.accept()

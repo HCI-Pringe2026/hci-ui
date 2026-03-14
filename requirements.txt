@@ -1,0 +1,6 @@
+numpy>=1.23
+scipy>=1.10
+PyQt5>=5.15
+pyqtgraph>=0.13
+pylsl>=1.16
+typing_extensions>=4.7
